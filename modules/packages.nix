@@ -18,6 +18,20 @@
               "devShells.default"
               "checks.bats"
             ];
+            # our own dev/docs/CI tooling, never needed to build a
+            # consumer's project (see mkseed/default.nix's comment).
+            excludeInputs = [
+              "devshell"
+              "emanote"
+              "git-hooks"
+              "github-actions-nix"
+              "gitlab-ci"
+              "mkdocs-flake"
+              "nix-github-actions"
+              "nix-unit"
+              "poetry2nix"
+              "treefmt-nix"
+            ];
             # no rev when using `nix build path:.`
             tag = self.rev or self.dirtyRev or null;
           };
