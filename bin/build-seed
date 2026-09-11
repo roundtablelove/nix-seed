@@ -105,6 +105,10 @@ repository=$registry/$imageName
 seed=$dir#$seedAttr
 lock=$dir/.$suffix.lock
 
+# `::group::seed: <phase>` lines fold the log in the Actions UI and,
+# with the timestamps the log carries, let bench/ time each phase of
+# this step separately -- the same instrumentation bin/mount-seed uses.
+echo '::group::seed: eval'
 name=$(nix eval --raw $seed.name)
 tag=$(nix eval --raw $seed.tag)
 system=$(nix eval --impure --raw --expr builtins.currentSystem)
@@ -112,20 +116,25 @@ system=$(nix eval --impure --raw --expr builtins.currentSystem)
 # hard-coded: linux ships store.squashfs, darwin store.dmg.zst.
 format=$(nix eval --raw $seed.format)
 artifact=$(nix eval --raw $seed.artifact)
+echo '::endgroup::'
 
 # build the seed (registration + nix.conf are baked inside it under
 # .seed/). a pure evaluation: the seed is built from the flake's own
 # inputs and nothing else.
+echo '::group::seed: build'
 out=$(nix build --print-build-logs --no-link --print-out-paths $seed)
 echo "Built seed $name:$tag ($format)"
+echo '::endgroup::'
 
 # on darwin the derivation yields the image's *inputs*, not the image:
 # hdiutil needs diskarbitrationd and cannot run in the nix sandbox, so
 # the packaging step happens here. see DESIGN.md#macos.
 if [[ $format == dmg ]]; then
+  echo '::group::seed: package'
   image=$(mktemp -d)/image
   "$(dirname "$0")"/make-dmg "$out" "$image/$artifact"
   out=$image
+  echo '::endgroup::'
 fi
 
 # {{{ push
@@ -137,7 +146,11 @@ tags+=(
 
 # push the seed as an OCI artifact (not an image): plain blobs, no
 # engine, no layer extraction on the consumer.
+echo '::group::seed: install oras'
 "$GITHUB_ACTION_PATH"/../bin/install-oras
+echo '::endgroup::'
+
+echo '::group::seed: push'
 oras login "$registry" --username "$REGISTRY_USER" --password-stdin \
   <<<"$REGISTRY_PASS"
 # capture the digest of *this* push, not `oras resolve "$repository:$tag"`:
@@ -154,6 +167,7 @@ digest=$(
 for t in "${tags[@]}"; do
   [[ $t == "$tag" ]] || oras tag "$repository@$digest" "$t"
 done
+echo '::endgroup::'
 echo "pushed $repository@$digest"
 
 # }}}
@@ -176,6 +190,7 @@ update_lock() {
   mv $lock.tmp $lock
 }
 
+echo '::group::seed: lock'
 git=(git -C $dir)
 "${git[@]}" config user.email >/dev/null || git+=(
   -c user.name='github-actions[bot]'
@@ -215,5 +230,6 @@ done
   exit 1
 }
 echo "seed.lock: $repository:$tag $system = $digest"
+echo '::endgroup::'
 
 # }}}
