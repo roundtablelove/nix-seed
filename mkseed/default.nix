@@ -1,17 +1,40 @@
+let
+
+  # resolves one seedOutputs entry ("<type>.<name>") against a flake's
+  # outputs. split on the FIRST "." only, so a name containing dots
+  # still resolves correctly. apps carry an optional `.package`
+  # passthru (the app itself is `{ type = "app"; program = "..."; }`,
+  # never a derivation); every other type is looked up directly. may
+  # throw (missing attribute, wrong type, ...) -- callers that need to
+  # survive a bad entry wrap this in tryWarn themselves.
+  resolveOutput =
+    pkgs: self: system: entry:
+    let
+      inherit (pkgs) lib;
+      parts = lib.splitString "." entry;
+      type = builtins.head parts;
+      outName = lib.concatStringsSep "." (builtins.tail parts);
+      output = self.${type}.${system}.${outName};
+    in
+    if type == "apps" then output.package or null else output;
+
+in
 {
   pkgs,
   self,
-  # drop a harvested derivation by value (forces it).
-  selfFilter ? (_drv: true),
-  # drop a harvested output by attribute NAME, before its value is
-  # forced. Needed for outputs that fail to *evaluate* (a builtin
-  # type error tryEval cannot catch, e.g. emanote's docs), which must
-  # be skipped without ever forcing them.
-  selfFilterName ? (_name: true),
-  # name from flake default package
+  # dotted "<type>.<name>" flake output paths to bake, e.g.
+  # "packages.default", "devShells.msrv", "checks.bats". <type> is one
+  # of apps/checks/devShells/packages, resolved as
+  # self.<type>.<system>.<name> -- see resolveOutput above. nothing
+  # here auto-discovers flake outputs, so an output the caller doesn't
+  # list is simply never looked up, and never forced: unlike the old
+  # auto-scan-plus-filter, there is no way to be surprised by an
+  # unwanted output evaluating at all.
+  seedOutputs ? [ "packages.default" ],
+  # name from the first seedOutputs entry
   name ?
     let
-      package = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
+      package = resolveOutput pkgs self pkgs.stdenv.hostPlatform.system (builtins.head seedOutputs);
     in
     "${package.pname or package.name or "unnamed"}.seed",
   tag ? self.rev or self.dirtyRev or null,
@@ -55,9 +78,10 @@ let
   inherit (stdenv.hostPlatform) system;
 
   # tryEval with a warning + fallback on throw. Catches assert/throw
-  # only; outputs failing with builtin type errors (which tryEval
-  # cannot catch) must be dropped by selfFilterName, before they are
-  # forced at all.
+  # only; an output failing with a builtin type error (which tryEval
+  # cannot catch, e.g. emanote's docs, which throws from toJSON over a
+  # functor) must simply not be named in seedOutputs -- nothing here
+  # auto-discovers outputs, so an unlisted one is never forced at all.
   tryWarn =
     msg: fallback: x:
     let
@@ -139,36 +163,26 @@ let
   #     way as stdenvNoCC: nix develop, offline, rebuilding libiconv
   #     from its own recipe (bootstrap-stage2-stdenv-darwin up) when
   #     just its "dev" output alone was missing.
-  # derivations the consumer flake exposes: apps, checks, devShells,
-  # packages. isDerivation reads only `.type` (cheap); the isNixSeed
-  # guard drops a nested seed before its inputDerivation is taken
-  # (which would recurse into this seed's own closure); selfFilter is
-  # the value-level predicate.
-  harvested = lib.filter
-    (
-      drv:
-      tryWarn "skipping a flake output that threw" false (
-        lib.isDerivation drv && !drv ? isNixSeed && selfFilter drv
+  # the derivations named by seedOutputs. isDerivation reads only
+  # `.type` (cheap); the isNixSeed guard drops a nested seed before its
+  # inputDerivation is taken (which would recurse into this seed's own
+  # closure). a seedOutputs entry that doesn't resolve (missing
+  # attribute, bad "<type>", ...) or throws while it or the checks
+  # above force it is skipped, with a warning naming it, rather than
+  # failing the whole build.
+  harvested = lib.filter (drv: drv != null) (
+    map
+      (
+        entry:
+        tryWarn "skipping seedOutputs entry \"${entry}\" (missing, or threw while resolving)" null (
+          let
+            drv = resolveOutput pkgs self system entry;
+          in
+          if lib.isDerivation drv && !drv ? isNixSeed then drv else null
+        )
       )
-    )
-    (
-      let
-        outputs =
-          attr:
-          lib.attrValues (
-            lib.filterAttrs (name: _: selfFilterName name) (
-              self.${attr}.${system} or { }
-            )
-          );
-      in
-      # apps have { type = "app"; program = "..."; }.
-      map (app: app.package or null) (outputs "apps")
-      ++ lib.concatMap outputs [
-        "checks"
-        "devShells"
-        "packages"
-      ]
-    );
+      seedOutputs
+  );
   buildTimeRoots = lib.concatMap
     (
       drv:
