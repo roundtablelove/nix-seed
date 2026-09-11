@@ -1,6 +1,7 @@
 {
   "repository": "ghcr.io/roundtablelove/nix-seed/examples/python/seed",
   "systems": {
+    "aarch64-darwin": "sha256:edaea71328b020cfd30604943d746cfa19fe64eec230556e7fbe84acd30f61a1",
     "aarch64-linux": "sha256:60891b06cad5565abe8531eefde967ffbf014957df46ca4ab310822cbfca0236"
   },
   "tag": "bdce29d270c93bae5b34257f4c27076ef318dfac"
