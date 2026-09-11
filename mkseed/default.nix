@@ -54,22 +54,12 @@ in
   # restores from the in-datacenter cache where size barely matters.
   compressionLevel ? 9,
   # flake inputs (by name, at any depth) whose source is NOT baked
-  # into the seed: nix-seed's own dev/docs/CI tooling, never needed
-  # to build a consumer's project. removeAttrs also stops the collect
-  # recursion into them, dropping their whole subtree (e.g. emanote's
-  # haskell closure).
-  excludeInputs ? [
-    "devshell"
-    "emanote"
-    "git-hooks"
-    "github-actions-nix"
-    "gitlab-ci"
-    "mkdocs-flake"
-    "nix-github-actions"
-    "nix-unit"
-    "poetry2nix"
-    "treefmt-nix"
-  ],
+  # into the seed. removeAttrs also stops the collect recursion into
+  # them, dropping their whole subtree (e.g. emanote's haskell
+  # closure). empty by default -- nix-seed's own dev/docs/CI tooling
+  # names aren't meaningful to a generic consumer; see
+  # modules/packages.nix for nix-seed's own list.
+  excludeInputs ? [ ],
   ...
 }:
 let
