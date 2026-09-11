@@ -11,9 +11,10 @@ digest, cache pull, mount seed for build-examples; Nix Setup, Cachix
 Setup, Build seed for seed-examples) only exist in the job log, as
 `##[start-action display=...]` / `##[end-action ...;duration_ms=N]`
 markers, so those two workflows' logs are fetched too. Post-job steps
-of a composite are prefixed `post `. bin/build-seed has no internal
-phase markers of its own (unlike bin/mount-seed), so seed-examples'
-"Build seed" step is one opaque total rather than a further breakdown.
+of a composite are prefixed `post `. bin/build-seed also carries its
+own `::group::seed: <phase>` markers (eval, build, package, install
+oras, push, lock -- the same instrumentation bin/mount-seed uses), so
+seed-examples' "Build seed" step gets that further breakdown too.
 
 A build-examples job also gets one `seed size` row, its `bytes` column
 holding the seed artifact's compressed size on the wire -- summed from
@@ -303,10 +304,14 @@ def rows(client: Client, run: Run) -> Iterator[dict[str, object]]:
             size, size_step = cache_bytes(client.log(job["id"])), "cache size"
         elif run.workflow == "seed-examples":
             # the seed/ composite action's own steps (Nix Setup, the
-            # optional Cachix Setup, Build seed itself); bin/build-seed
-            # has no internal phase markers of its own, unlike
-            # bin/mount-seed, so "Build seed" is one opaque total.
-            steps += composite_steps(client.log(job["id"]))
+            # optional Cachix Setup, Build seed itself) plus, now that
+            # bin/build-seed carries its own `::group::seed: <phase>`
+            # markers (the same instrumentation bin/mount-seed uses),
+            # a breakdown of what "Build seed" itself is spending time
+            # on: eval, build, package (darwin only), install oras,
+            # push, lock.
+            log = client.log(job["id"])
+            steps += composite_steps(log) + phase_steps(log)
         for name, secs in steps:
             yield {**base, "step": name, "seconds": secs}
         if size is not None:

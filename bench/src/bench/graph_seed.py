@@ -34,14 +34,22 @@ from bench.common import (
 configure()
 
 WORKFLOW = "seed-examples"
-# the seed/ composite action's own steps, in execution order.
-# bin/build-seed has no internal phase markers (unlike bin/mount-seed),
-# so "Build seed" is one opaque total rather than a further breakdown.
+# the seed/ composite action's own steps, in execution order. bin/
+# build-seed carries its own `::group::seed: <phase>` markers (the same
+# instrumentation bin/mount-seed uses); where they exist the "Build
+# seed" total is dropped so the bar does not count them twice.
 STEPS = (
     "Nix Setup",
     "Cachix Setup",
     "Build seed",
+    "seed: eval",
+    "seed: build",
+    "seed: package",
+    "seed: install oras",
+    "seed: push",
+    "seed: lock",
 )
+PHASES = tuple(s for s in STEPS if s.startswith("seed: "))
 
 app = typer.Typer(add_completion=False)
 
@@ -85,6 +93,10 @@ def load(
     for run_id, example, os, step, secs in rows:
         _, sha = runs[run_id]
         samples[example, os][step][ordinal[sha]].append(secs)
+    for steps in samples.values():
+        phased = {x for p in PHASES for x in steps.get(p, {})}
+        for x in phased:
+            steps.get("Build seed", {}).pop(x, None)
     return list(ordinal), samples
 
 
