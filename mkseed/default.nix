@@ -114,30 +114,37 @@ let
   # every store path the seed must contain, as closureInfo rootPaths:
   #   - nix itself: the consumer runs it from the mounted store.
   #   - pathEnv: the buildEnv exposed at .seed/env (bin/ + etc/nix.conf).
-  #   - stdenv and stdenvNoCC: `inputDerivation` (below) deliberately
-  #     never sources `$stdenv/setup` -- nixpkgs' own comment on it is
-  #     "does not use setup.sh or stdenv, to keep the env most pristine"
-  #     -- so neither's store path ever appears in what it captures.
-  #     `nix build` never notices, since a package whose output is
-  #     already registered valid skips its builder (and so setup.sh)
-  #     entirely; `nix develop` always re-runs part of the build to
-  #     construct the interactive environment, which does source it.
-  #     both variants are needed: a devShell pulling in a prebuilt
+  #   - stdenv and stdenvNoCC, but only when seedOutputs names a
+  #     devShell: an ordinary package or check's own inputDerivation
+  #     already references whichever variant it was built with (nix
+  #     sets it as a plain, unconditional env var, independent of
+  #     whether the builder ever sources $stdenv/setup -- confirmed via
+  #     `nix path-info`, which lists e.g. stdenv-linux-no-cc as a real
+  #     reference of a plain runCommand's inputDerivation), so
+  #     closureInfo already bakes it transitively there. what that
+  #     never covers is `nix develop` itself: it always re-runs part of
+  #     the build to construct its interactive environment, sourcing
+  #     $stdenv/setup for real, and a devShell pulling in a prebuilt
   #     toolchain (e.g. rust-overlay, which unpacks rather than
   #     compiles) is built with stdenvNoCC, a genuinely different
   #     derivation from stdenv, not merely stdenv without a compiler
   #     attached later -- confirmed by finding nix develop, offline,
   #     rebuilding stdenvNoCC's *own* recipe from bootstrap-tools up
-  #     when it alone was missing.
-  #   - bashInteractive: nix develop always needs a real, readline-
-  #     capable bash to build its interactive environment against,
-  #     regardless of what any devShell declares -- this is nix's own
-  #     choice, not the flake's, so nothing a consumer's flake exposes
-  #     ever references it and no other rule here would catch it.
-  #     confirmed the same way as stdenv/stdenvNoCC and libiconv above:
-  #     nix develop, offline, rebuilding it from its own recipe
-  #     (gettext, perl, bison, m4, readline -- and so bootstrap-tools up
-  #     to build *them*) when it alone was missing.
+  #     when it alone was missing. so both are included whenever a
+  #     devShell is being baked (nix develop may run against it) and
+  #     dropped otherwise (verified: examples/{rust,python,curl,
+  #     eval-heavy}, all packages-only with no devShell in sight and
+  #     eval-heavy's default itself stdenvNoCC-built via runCommand,
+  #     all build offline without either baked).
+  #   - bashInteractive, same condition: nix develop always needs a
+  #     real, readline-capable bash to build its interactive
+  #     environment against, regardless of what any devShell declares
+  #     -- this is nix's own choice, not the flake's, so nothing a
+  #     consumer's flake exposes ever references it and no other rule
+  #     here would catch it. confirmed the same way as stdenv/stdenvNoCC
+  #     and libiconv above: nix develop, offline, rebuilding it from its
+  #     own recipe (gettext, perl, bison, m4, readline -- and so
+  #     bootstrap-tools up to build *them*) when it alone was missing.
   #   - every flake input source, recursively -> offline flake
   #     *evaluation* (nix reads each locked input from the store).
   #   - each output's inputDerivation -> its full build-input closure,
@@ -194,6 +201,8 @@ let
     rootPaths = [
       nix
       pathEnv
+    ]
+    ++ lib.optionals (lib.any (lib.hasPrefix "devShells.") seedOutputs) [
       stdenv
       pkgs.stdenvNoCC
       pkgs.bashInteractive
