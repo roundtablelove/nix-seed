@@ -201,8 +201,16 @@ echo "pushed $repository@$digest"
 
 # {{{ update seed lock
 
-# fresh object: drops legacy keys, and a tag change invalidates the
-# recorded digests of the other systems
+# fresh object: drops legacy keys, and rewrites only this system's entry.
+# the tag lives inside that entry rather than at the top level because it
+# is per-system state: it defaults to self.rev (mkseed/default.nix), which
+# moves with every `chore(seed): lock` commit, so the systems of one
+# logical seed are routinely pushed under different tags. a single shared
+# tag therefore made every sibling look stale, and the old "tag changed ->
+# reset systems" rule let whichever system committed last erase the
+# others -- leaving the consumer's lock with no entry for its own system
+# at all. staleness is now recorded per system and invalidates nothing but
+# the entry it belongs to.
 update_lock() {
   [[ -f $lock ]] || printf '{}\n' >$lock
   jq --sort-keys \
@@ -210,9 +218,8 @@ update_lock() {
     --arg system "$system" --arg digest "$digest" \
     '{
       repository: $repository,
-      tag: $tag,
-      systems: ((if .tag == $tag then .systems else {} end) // {}
-        | .[$system] = $digest)
+      systems: ((.systems // {})
+        | .[$system] = { digest: $digest, tag: $tag })
     }' $lock >$lock.tmp
   mv $lock.tmp $lock
 }

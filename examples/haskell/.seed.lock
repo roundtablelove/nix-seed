@@ -1,8 +1,13 @@
 {
   "repository": "ghcr.io/roundtablelove/nix-seed/examples/haskell/seed",
   "systems": {
-    "aarch64-darwin": "sha256:926e5d14f4b33cdc95ff341ba53c8551ef552ac32aea21130af3d7676561c4fd",
-    "aarch64-linux": "sha256:94fd1f6b0de48aa67029f9a57fc1657e325f815699824b196a9311b43ab1cb0c"
-  },
-  "tag": "095deaa37aaf9d8c734209960c66ef467a1aed48"
+    "aarch64-darwin": {
+      "digest": "sha256:926e5d14f4b33cdc95ff341ba53c8551ef552ac32aea21130af3d7676561c4fd",
+      "tag": "095deaa37aaf9d8c734209960c66ef467a1aed48"
+    },
+    "aarch64-linux": {
+      "digest": "sha256:94fd1f6b0de48aa67029f9a57fc1657e325f815699824b196a9311b43ab1cb0c",
+      "tag": "095deaa37aaf9d8c734209960c66ef467a1aed48"
+    }
+  }
 }

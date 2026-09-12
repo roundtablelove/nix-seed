@@ -27,12 +27,36 @@ runs:
       id: seed
       shell: bash
       run: |
+        set -euo pipefail
         system=$(uname -m | sed s/arm64/aarch64/)-$(uname -s | tr '[:upper:]' '[:lower:]')
         # lock file for this seed attribute: "seed" -> .seed.lock, dots
         # becoming dashes (mirrors bin/build-seed)
         suffix=${{ inputs.seed_attr }}
         lock=${{ inputs.path }}/.${suffix//./-}.lock
-        digest=$(jq -er --arg s "$system" '.systems[$s]' "$lock")
+        [[ -f $lock ]] || {
+          echo "nix-seed: no seed lock at $lock" >&2
+          echo "run the seed action against ${{ inputs.path }} to" >&2
+          echo "publish a seed and write its lock." >&2
+          exit 1
+        }
+        # `objects | ... // empty` rather than jq -e: an absent entry, and
+        # a pre-schema one (the digest stored as a bare string), both have
+        # to reach the diagnostic below instead of aborting here on a jq
+        # type error or a bare exit 1 with nothing said.
+        digest=$(jq --raw-output --arg s "$system" \
+          '.systems[$s]? | objects | .digest // empty' "$lock")
+        [[ -n $digest ]] || {
+          locked=$(jq --raw-output '(.systems // {} | keys) as $systems
+            | if $systems == [] then "(none)"
+              else $systems | join(", ") end' "$lock")
+          echo "nix-seed: $lock records no seed for $system" >&2
+          echo "nix-seed: locked systems: $locked" >&2
+          echo "nix-seed: seed $system and commit the lock before" >&2
+          echo "building on it. a lock whose entries are bare digest" >&2
+          echo "strings predates the per-system {digest, tag} shape and" >&2
+          echo "needs re-seeding on every system it lists." >&2
+          exit 1
+        }
         echo "lock=$lock" >>"$GITHUB_OUTPUT"
         echo "digest=$digest" >>"$GITHUB_OUTPUT"
 
