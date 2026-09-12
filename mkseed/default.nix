@@ -34,7 +34,9 @@ in
   # name from the first seedOutputs entry
   name ?
     let
-      package = resolveOutput pkgs self pkgs.stdenv.hostPlatform.system (builtins.head seedOutputs);
+      package = resolveOutput pkgs self pkgs.stdenv.hostPlatform.system (
+        builtins.head seedOutputs
+      );
     in
     "${package.pname or package.name or "unnamed"}.seed",
   tag ? self.rev or self.dirtyRev or null,
@@ -186,25 +188,31 @@ let
   # above force it is skipped, with a warning naming it, rather than
   # failing the whole build.
   harvested = lib.filter (drv: drv != null) (
-    map
-      (
-        entry:
-        tryWarn "skipping seedOutputs entry \"${entry}\" (missing, or threw while resolving)" null (
+    map (
+      entry:
+      tryWarn
+        "skipping seedOutputs entry \"${entry}\" (missing, or threw while resolving)"
+        null
+        (
           let
             drv = resolveOutput pkgs self system entry;
           in
           if lib.isDerivation drv && !drv ? isNixSeed then drv else null
         )
-      )
-      seedOutputs
+    ) seedOutputs
   );
-  buildTimeRoots = lib.concatMap
-    (
-      drv:
-      tryWarn "no build inputs for a flake output (threw)" [ ] (
-        lib.concatMap (
-          input: if lib.isDerivation input then map (o: input.${o}) (input.outputs or [ "out" ]) else [ input ]
-        ) (
+  buildTimeRoots = lib.concatMap (
+    drv:
+    tryWarn "no build inputs for a flake output (threw)" [ ] (
+      lib.concatMap
+        (
+          input:
+          if lib.isDerivation input then
+            map (o: input.${o}) (input.outputs or [ "out" ])
+          else
+            [ input ]
+        )
+        (
           lib.concatMap (attr: drv.${attr} or [ ]) [
             "buildInputs"
             "nativeBuildInputs"
@@ -212,9 +220,8 @@ let
             "propagatedNativeBuildInputs"
           ]
         )
-      )
     )
-    harvested;
+  ) harvested;
   closure = pkgs.closureInfo {
     rootPaths = [
       nix
@@ -236,14 +243,12 @@ let
       map (i: i.outPath) (collect self)
     )
     ++ lib.filter (p: p != null) (
-      map
-        (
-          drv:
-          tryWarn "no build closure for a flake output (threw)" null (
-            drv.inputDerivation or drv
-          )
+      map (
+        drv:
+        tryWarn "no build closure for a flake output (threw)" null (
+          drv.inputDerivation or drv
         )
-        harvested
+      ) harvested
     )
     ++ buildTimeRoots;
   };
