@@ -41,23 +41,33 @@ jobs:
       examples: ${{ steps.list.outputs.examples }}
       ref: ${{ steps.ref.outputs.sha }}
     steps:
-      # a plain checkout on a workflow_run event takes whatever is
-      # currently at the default branch's tip, which by the time this
-      # fires is routinely a few `chore(seed): lock` commits ahead of the
-      # change that triggered seeding (seed-examples pushes one per
-      # architecture as it runs). github.event.workflow_run.head_sha does
-      # NOT fix this -- confirmed empirically, it carries the same drift
-      # (it tracked a trailing lock commit even for a plain push trigger).
-      # what does stay correct is the run's own recorded head_sha via the
-      # API, so ask for that instead. github.sha on every other trigger
-      # (push, workflow_dispatch) already is the right commit.
-      - name: resolve the triggering commit
+      # on a workflow_run trigger the commit that started seeding is the
+      # one commit that can never carry the result: build-seed writes each
+      # system's digest as a `chore(seed): lock` commit ON TOP of it, so
+      # the triggering tree holds only the lock as it stood *before* the
+      # seeding this run is here to test. pinning to it (whether via
+      # github.sha, github.event.workflow_run.head_sha, or the run's
+      # recorded head_sha read back from the API) therefore does not
+      # remove drift, it guarantees it: the build silently mounts the
+      # previous seed, and fails outright for any system whose entry the
+      # older lock was missing. the branch tip is the only tree where the
+      # lock is complete, so resolve that. seed-examples serialises on a
+      # concurrency group, so no second seeding is mid-write here.
+      # resolved once, in this job, so every matrix job pins the same
+      # commit. github.sha on every other trigger (push,
+      # workflow_dispatch) already is the right commit.
+      - name: resolve the commit to build
         id: ref
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # through the environment, not interpolated into the script: a
+          # branch name is attacker-shaped text on a workflow_run trigger.
+          BRANCH: ${{ github.event.workflow_run.head_branch }}
         run: |
+          set -euo pipefail
           if [[ ${{ github.event_name }} == workflow_run ]]; then
-            sha=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id }}" --jq .head_sha)
+            sha=$(gh api --jq .sha \
+              "repos/${{ github.repository }}/commits/$BRANCH")
           else
             sha=${{ github.sha }}
           fi
@@ -87,8 +97,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       # pinned to the same commit setup resolved above, not re-resolved
-      # here: see its comment for why a plain checkout, or even
-      # github.event.workflow_run.head_sha, is not good enough. named
+      # here: a plain checkout per job would let the matrix straddle two
+      # trees if anything lands on the branch mid-run. named
       # after that sha, not just "checkout": this run's own head_sha (as
       # the Actions API reports it) has the same drift for a
       # workflow_run trigger, so bench-workflows reads the real one back
