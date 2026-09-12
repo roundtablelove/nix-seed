@@ -35,7 +35,18 @@ jobs:
     outputs:
       examples: ${{ steps.list.outputs.examples }}
     steps:
+      # pinned: a plain checkout on a workflow_run event takes whatever is
+      # currently at the default branch's tip, which by the time this
+      # fires is routinely a few `chore(seed): lock` commits ahead of the
+      # change that triggered seeding (seed-examples pushes one per
+      # architecture as it runs). pinning to the triggering run's own sha
+      # keeps the build tied to the commit it is actually verifying, and
+      # keeps bench/'s per-commit graphs from attributing that run to an
+      # unrelated, unlabelled lock commit. github.sha on every other
+      # trigger (push, workflow_dispatch) already is the right commit.
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
       - id: list
         uses: ./.github/actions/list-examples
 
@@ -57,7 +68,10 @@ jobs:
           # - macos-15-intel
     runs-on: ${{ matrix.os }}
     steps:
+      # pinned: see setup's checkout above -- same reason, same fallback.
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
 
       - uses: ./
         with:
