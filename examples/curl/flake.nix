@@ -50,6 +50,18 @@
           seed = inputs.nix-seed.lib.mkSeed {
             inherit pkgs;
             inherit (inputs) self;
+            excludeInputs = [
+              "devshell"
+              "emanote"
+              "git-hooks"
+              "github-actions-nix"
+              "gitlab-ci"
+              "mkdocs-flake"
+              "nix-github-actions"
+              "nix-unit"
+              "poetry2nix"
+              "treefmt-nix"
+            ];
           };
 
         }
