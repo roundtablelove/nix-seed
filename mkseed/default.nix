@@ -87,6 +87,8 @@ let
     paths = pathPackages ++ [
       (pkgs.writeTextDir "etc/nix/nix.conf" ''
         experimental-features = nix-command flakes
+        cores = 0
+        max-jobs = auto
         build-users-group =
         sandbox = false
         substitute = false
