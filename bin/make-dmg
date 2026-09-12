@@ -27,34 +27,29 @@ out=${2:?output .dmg path required}
 # evaluation sits in a 1.5s band. See DESIGN.md#macos.
 
 work=$(mktemp -d)
-mnt=$work/mnt
+staging=$work/staging
 cleanup() {
-  # detach before removing, or the sparse image stays attached and the
-  # next run collides on the volume name
-  hdiutil detach "$mnt" -force >/dev/null 2>&1 || true
   rm -rf "$work"
 }
 trap cleanup EXIT
 
-# size the sparse image from the closure's total nar size, with headroom
-# for filesystem overhead. sparse means unused blocks cost nothing, so
-# being generous here is free.
-narsize=$(cat "$stage/nar-size")
-megs=$((narsize * 3 / 2000000 + 512))
+# Prepare staging tree with the exact structure hdiutil will copy into the image.
+# hdiutil create -srcfolder performs atomic filesystem copy optimized by macOS,
+# avoiding mount/detach coordination overhead of the prior sparse→convert flow.
+mkdir -p "$staging/store" "$staging/.seed"
 
-# a case-sensitive filesystem is mandatory: the store holds paths that
-# differ only in case, and APFS defaults to case-insensitive. HFS+
-# rather than APFS: `hdiutil attach`'s cost tracks file count, not
-# bytes, and HFS+'s flat catalog B-tree is lighter per file to walk on
-# attach than APFS's copy-on-write object map -- six rounds each way
-# measured attach dropping from 4-5s to about 1.2-1.3s on both
-# examples. see DESIGN.md#macos.
-hdiutil create -size "${megs}m" -fs 'Case-sensitive Journaled HFS+' \
-  -volname NixSeed -type SPARSE -o "$work/rw"
-hdiutil attach "$work/rw.sparseimage" -mountpoint "$mnt" \
-  -owners off -nobrowse -noautoopen
+# ditto preserves modes and symlinks; store paths land under store/ by
+# basename, so the image contains store/ at its root (mounted at /nix
+# by the consumer, making it /nix/store).
+while read -r p; do
+  [[ -n $p ]] || continue
+  ditto "$p" "$staging/store/${p##*/}"
+done <"$stage/store-paths"
 
-mkdir -p "$mnt/store" "$mnt/.seed"
+cp "$stage/registration" "$staging/.seed/registration"
+# an absolute symlink into the store, resolved once the image is
+# attached at /nix -- the same contract as the squashfs pseudo-entry.
+ln -s "$(readlink "$stage/env")" "$staging/.seed/env"
 
 # /nix/var is a symlink to a fixed path outside the image, not a
 # directory inside it: mount-seed attaches the whole image at /nix (the
@@ -64,23 +59,16 @@ mkdir -p "$mnt/store" "$mnt/.seed"
 # like the rest of the volume. The symlink's target is real disk instead,
 # created by mount-seed before attach; nix follows it transparently.
 # see DESIGN.md#macos.
-ln -s /private/var/nix-seed "$mnt/var"
+ln -s /private/var/nix-seed "$staging/var"
 
-# ditto preserves modes and symlinks; store paths land under store/ by
-# basename, so the volume mounted at /nix *is* /nix/store.
-while read -r p; do
-  [[ -n $p ]] || continue
-  ditto "$p" "$mnt/store/${p##*/}"
-done <"$stage/store-paths"
-
-cp "$stage/registration" "$mnt/.seed/registration"
-# an absolute symlink into the store, resolved once the image is
-# attached at /nix -- the same contract as the squashfs pseudo-entry.
-ln -s "$(readlink "$stage/env")" "$mnt/.seed/env"
-
-hdiutil detach "$mnt"
-
-hdiutil convert "$work/rw.sparseimage" -format UDRO -o "$work/store.dmg"
+# Build the image directly from the staging tree using hdiutil create -srcfolder.
+# This is faster than the prior mount+ditto+unmount sequence because it uses
+# macOS's optimized bulk filesystem copy and avoids mount/detach coordination.
+# Case-sensitive HFS+ is mandatory: the store holds paths differing only in case,
+# and APFS defaults to case-insensitive. See DESIGN.md#macos.
+hdiutil create -srcfolder "$staging" -format UDRO \
+  -fs 'Case-sensitive Journaled HFS+' -volname NixSeed \
+  -o "$work/store.dmg"
 
 # zstd for transport only: the registry blob and the cache entry would
 # otherwise carry 3-4 GB of raw blocks. Level 9 mirrors mkSeed's
