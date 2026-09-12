@@ -34,7 +34,7 @@ cleanup() {
 trap cleanup EXIT
 
 # Prepare staging tree for atomic creation via hdiutil -srcfolder.
-# rsync -aX preserves modes, times, symlink targets, and extended attributes.
+# rsync -a preserves modes, times, and symlink targets (BSD rsync on macOS).
 # This avoids the mount/detach coordination overhead of the sparse→convert flow.
 mkdir -p "$staging/store" "$staging/.seed"
 
@@ -42,7 +42,7 @@ mkdir -p "$staging/store" "$staging/.seed"
 # its root (mounted at /nix by the consumer, making it /nix/store).
 while read -r p; do
   [[ -n $p ]] || continue
-  rsync -aX "$p" "$staging/store/${p##*/}"
+  rsync -a "$p" "$staging/store/${p##*/}"
 done <"$stage/store-paths"
 
 cp "$stage/registration" "$staging/.seed/registration"
