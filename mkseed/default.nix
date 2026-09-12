@@ -261,21 +261,16 @@ let
   # into the baked buildEnv (env/bin for PATH, env/etc/nix.conf for the
   # build config). the consumer reads them from the read-only mount.
   # mounting is O(1); reads decompress lazily, so there is no per-file
-  # extraction. see DESIGN.md#delivery.
-  # what the consumer will fetch, per platform. bin/build-seed reads
-  # both from passthru rather than hard-coding a filename.
-  format = if stdenv.hostPlatform.isDarwin then "dmg" else "squashfs";
-  # the dmg is uncompressed -- attach and every read go through the
-  # codec otherwise, see DESIGN.md#macos -- and travels under zstd.
-  artifact = if format == "dmg" then "store.dmg.zst" else "store.squashfs";
+  # extraction. see DESIGN.md#delivery. the linux/darwin split
+  # (squashfs vs uncompressed dmg.zst) is determined by the system at
+  # build time and is now bin/build-seed's concern, not exposed via
+  # passthru.
 
   passthru = {
     inherit
       name
       tag
       pathEnv
-      format
-      artifact
       ;
     # marker so a seed harvesting self.packages skips a nested seed
     # (its inputDerivation would recurse into this closure).
@@ -324,7 +319,7 @@ lib.throwIf (!stdenv.hostPlatform.isLinux && !stdenv.hostPlatform.isDarwin)
           # .seed/env -> the baked buildEnv, resolved through the mounted
           # store; the consumer adds /nix/.ro-store/.seed/env/bin to PATH
           # and reads /nix/.ro-store/.seed/env/etc/nix.conf.
-          mksquashfs $(cat ${closure}/store-paths) $out/${artifact} \
+          mksquashfs $(cat ${closure}/store-paths) $out/store.squashfs \
             -keep-as-directory -all-root -no-hardlinks \
             -comp zstd -Xcompression-level ${toString compressionLevel} \
             -p '.seed d 555 0 0' \

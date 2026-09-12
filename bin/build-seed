@@ -107,15 +107,20 @@ lock=$dir/.$suffix.lock
 
 echo '::group::seed: eval'
 eval "$(nix eval --impure --json --apply 'seed: {
-  inherit (seed) name tag format artifact;
+  inherit (seed) name tag;
   system = builtins.currentSystem;
 }' "$seed" | jq -r '
 "name=\(.name | @sh)
 tag=\(.tag | @sh)
-system=\(.system | @sh)
-format=\(.format | @sh)
-artifact=\(.artifact | @sh)"
+system=\(.system | @sh)"
 ')"
+# the darwin/linux split is a 1:1 function of system, so derive the
+# filename here rather than reading it back out of the seed's own
+# evaluation (mkseed/default.nix no longer exposes it).
+artifact=store.squashfs
+# the dmg is uncompressed -- attach and every read go through the
+# codec otherwise, see DESIGN.md#macos -- and travels over zstd.
+[[ $system =~ darwin ]] && artifact=store.dmg.zst
 echo '::endgroup::'
 
 # build the seed (registration + nix.conf are baked inside it under
@@ -123,13 +128,13 @@ echo '::endgroup::'
 # inputs and nothing else.
 echo '::group::seed: build'
 out=$(nix build --print-build-logs --no-link --print-out-paths $seed)
-echo "Built seed $name:$tag ($format)"
+echo "Built seed $name:$tag ($system)"
 echo '::endgroup::'
 
 # on darwin the derivation yields the image's *inputs*, not the image:
 # hdiutil needs diskarbitrationd and cannot run in the nix sandbox, so
 # the packaging step happens here. see DESIGN.md#macos.
-if [[ $format == dmg ]]; then
+if [[ $system =~ darwin ]]; then
   echo '::group::seed: package'
   image=$(mktemp -d)/image
   "$(dirname "$0")"/make-dmg "$out" "$image/$artifact"
@@ -182,7 +187,7 @@ oras login "$registry" --username "$REGISTRY_USER" --password-stdin \
 digest=$(
   cd "$out"
   oras push "$repository:$tag" \
-    "$artifact:application/vnd.nix-seed.$format" \
+    "$artifact:application/vnd.nix-seed.$system" \
     --format go-template="{{.digest}}"
 )
 # extra tags: retag the same manifest, no re-upload
