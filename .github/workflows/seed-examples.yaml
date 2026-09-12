@@ -26,6 +26,16 @@ on:
       - .github/workflows/seed-examples.yaml
   workflow_dispatch:
 
+# two seedings must never overlap. each pushes a `chore(seed): lock`
+# commit per system, and the tag those record is self.rev, so runs
+# started at different commits write entries under different tags and
+# interleave them into one lock. cancel-in-progress is false, not true:
+# an in-flight run has already pushed some of its seeds to the registry,
+# and killing it strands them unrecorded.
+concurrency:
+  group: seed-examples
+  cancel-in-progress: false
+
 jobs:
   setup:
     runs-on: ubuntu-latest
