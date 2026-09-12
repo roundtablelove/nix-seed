@@ -1,8 +1,7 @@
 {
   "repository": "ghcr.io/roundtablelove/nix-seed/examples/eval-heavy/seed",
   "systems": {
-    "aarch64-darwin": "sha256:a3251f4f491102f8bfff636fcd4c891a23cc2fbea65d94ce0e66bef2fd0b7287",
-    "aarch64-linux": "sha256:9e3ea64b42fc32a415a60cb2320c023786747b7c66e92769f65e6d6a34daa030"
+    "aarch64-linux": "sha256:84e5f3662420f7a92334244bcd1ac1de63a2123ef17c4668f0ae03cebb56433f"
   },
-  "tag": "f209d5a72df20f270b8e5d4facdc91ec7d88b907"
+  "tag": "e58678ca321e336bc47bd49f8415628858ab36bc"
 }
