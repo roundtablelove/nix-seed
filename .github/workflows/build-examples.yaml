@@ -88,8 +88,14 @@ jobs:
     steps:
       # pinned to the same commit setup resolved above, not re-resolved
       # here: see its comment for why a plain checkout, or even
-      # github.event.workflow_run.head_sha, is not good enough.
-      - uses: actions/checkout@v7
+      # github.event.workflow_run.head_sha, is not good enough. named
+      # after that sha, not just "checkout": this run's own head_sha (as
+      # the Actions API reports it) has the same drift for a
+      # workflow_run trigger, so bench-workflows reads the real one back
+      # from this step's name via the (much cheaper) jobs API, rather
+      # than needing this job's full log.
+      - name: checkout ${{ needs.setup.outputs.ref }}
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.setup.outputs.ref }}
 

@@ -85,6 +85,12 @@ END = re.compile(
 PHASE = re.compile(
     r"^(?P<when>\S+Z) ##\[(?:group\](?P<name>seed: [^\r]*)|endgroup\])"
 )
+# build-examples' own checkout step names itself after the commit it
+# resolved (see build-examples.yaml): a run's own head_sha, as the
+# Actions API reports it, drifts to whatever `chore(seed): lock` commit
+# landed on master by the time a workflow_run-triggered run's metadata
+# was recorded, so this is the one place the real commit survives.
+CHECKOUT_REF = re.compile(r"^checkout (?P<sha>[0-9a-f]{40})$")
 # one of bin/mount-seed's parallel range-fetch streams reporting its own
 # downloaded bytes; summed across streams, this is the seed artifact's
 # compressed size (store.squashfs or store.dmg.zst -- whichever this run
@@ -256,7 +262,29 @@ def completed_runs(client: Client) -> list[Run]:
     return sorted(runs, key=lambda r: (r.created_at, r.id))
 
 
+def head_sha(run: Run, jobs: list[dict]) -> str:
+    """run.head_sha, except for a build-examples run triggered by
+    workflow_run: there, the Actions API's own head_sha for this run has
+    already drifted (see CHECKOUT_REF), so prefer whatever its checkout
+    step actually resolved and named itself after."""
+    if run.workflow != "build-examples" or run.event != "workflow_run":
+        return run.head_sha
+    for job in jobs:
+        for step in job["steps"]:
+            if m := CHECKOUT_REF.match(step["name"]):
+                return m["sha"]
+    return run.head_sha
+
+
 def rows(client: Client, run: Run) -> Iterator[dict[str, object]]:
+    jobs = [
+        (job, matched)
+        for job in client.paged(
+            f"{API}/actions/runs/{run.id}/jobs?per_page=100", "jobs"
+        )
+        if (matched := JOB_NAME.match(job["name"]))
+    ]
+    sha = head_sha(run, [job for job, _ in jobs])
     # one `run` row per run, whatever its jobs: it is what marks the run
     # as recorded, so a run with no matrix jobs is not refetched forever
     yield {
@@ -264,7 +292,7 @@ def rows(client: Client, run: Run) -> Iterator[dict[str, object]]:
         "workflow": run.workflow,
         "event": run.event,
         "created_at": run.created_at,
-        "head_sha": run.head_sha,
+        "head_sha": sha,
         "job_id": "",
         "example": "",
         "os": "",
@@ -272,17 +300,13 @@ def rows(client: Client, run: Run) -> Iterator[dict[str, object]]:
         "step": "run",
         "seconds": seconds(run.started_at, run.updated_at),
     }
-    url = f"{API}/actions/runs/{run.id}/jobs?per_page=100"
-    for job in client.paged(url, "jobs"):
-        matched = JOB_NAME.match(job["name"])
-        if not matched:
-            continue
+    for job, matched in jobs:
         base = {
             "run_id": run.id,
             "workflow": run.workflow,
             "event": run.event,
             "created_at": run.created_at,
-            "head_sha": run.head_sha,
+            "head_sha": sha,
             "job_id": job["id"],
             "example": matched["example"],
             "os": matched["os"],
