@@ -193,7 +193,7 @@ choice:
   only in case, and both APFS and HFS+ default to insensitive. The base image
   is Case-sensitive Journaled HFS+, not APFS: attach cost tracks file count
   (see below), and HFS+'s flat catalog B-tree is lighter to walk per file on
-  attach than APFS's copy-on-write object map. `bin/make-dmg` used APFS
+  attach than APFS's copy-on-write object map. The image used APFS
   originally; six rounds each way on `python` and `rust` measured attach
   dropping from 4-5s to about 1.2-1.3s on both, with no overlap between the
   two sample ranges. Load-db got moderately slower on both (about 1.1-1.3s to
@@ -214,12 +214,37 @@ choice:
   `-shadow` file's copy-on-write, the same block-level indirection that makes
   attach itself expensive - `nix-store --load-db` cost about 1s there against
   0.15s for the identical write on Linux's native `/nix/var`.
-- **The image is built outside the sandbox.** `hdiutil` needs
-  `diskarbitrationd`, so unlike `mksquashfs` it cannot run in a `runCommand`.
-  On Darwin `mkSeed` therefore emits the image's *inputs* - the same
-  `closureInfo` output - and `bin/make-dmg` assembles them in the seeding
-  script. What the image contains is still decided by evaluation; only the
-  packaging escapes.
+- **The image is written by a derivation that declares its escape.**
+  `hdiutil` talks to `diskarbitrationd` and the DiskImages helper, mach
+  services the sandbox denies, so unlike `mksquashfs` it cannot run in a
+  sandboxed `runCommand`. The darwin branch of `mkSeed` therefore sets
+  `__noChroot`, which Nix honours where the builder sets `sandbox = relaxed`
+  - `seed/action.yaml` sets it on macOS only. The image is a derivation
+  output like the squashfs is, and `/usr/bin/hdiutil` is the single implicit
+  host dependency left: `pax`, which builds the hardlink farm handed to
+  `hdiutil`, and `zstd` are declared inputs.
+
+  Two consequences follow. The farm has to live on the store's own
+  filesystem, because the installer gives `/nix` a separate APFS volume and
+  linking out of `/nix/store` into a build directory under `/private/tmp`
+  fails with `EXDEV`; the action's `build-dir = /nix/tmp` is what puts it
+  there. And the output is not byte-reproducible - `hdiutil` stamps a volume
+  UUID and a creation time - which is exactly why the
+  [closure manifest](#closure-manifest), not the image digest, is the
+  anchor.
+
+  Declaring the escape was chosen over the alternatives after each was
+  tested. Nothing creates an HFS+ filesystem in userspace: Apple's
+  `newfs_hfs` requires a block device (the `DKIOCGETBLOCKSIZE` and
+  `DKIOCGETBLOCKCOUNT` ioctls are unconditional, and only `-N`, a dry run,
+  skips them), the Linux port that does format plain files is Linux-only,
+  and `libdmg-hfsplus` has no formatter at all - it writes a valid HFSX
+  catalog into an existing volume, verified against an independent reader,
+  but follows symlinks and drops modes while doing it. ISO 9660 with Rock
+  Ridge *can* be written in the sandbox and carries everything a store
+  needs, including paths differing only in case, but macOS mounts `cd9660`
+  read-only: `-shadow` makes the block device writable, not the filesystem
+  above it, and the store has to accept the consumer's own build outputs.
 
 Measured on `macos-15` (Apple Silicon), five rounds per example. The image is
 shipped **uncompressed** (UDRO) inside a zstd stream, which the consumer decodes
@@ -239,7 +264,7 @@ ULFO) image directly, and the reversal is the most important Darwin finding:
 - **The transfer does not get bigger.** zstd over raw blocks beats lzfse:
   `rust` 704 -> 593 MB, `python` 864 -> 673 MB. Pushed raw to the registry,
   though, the image is 3-3.8 GB and the seed's push step went from ~35s to
-  ~200s. So `bin/make-dmg` wraps it in zstd for transport and `bin/mount-seed`
+  ~200s. So `mkSeed` wraps it in zstd for transport and `bin/mount-seed`
   decodes it once before attaching, the same shape as Linux: compressed at
   rest, plain blocks under the mount.
 
