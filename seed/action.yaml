@@ -52,16 +52,17 @@ runs:
 
     # nix creates each build directory inside build-dir but not build-dir
     # itself, so the directory named above has to exist before the first
-    # build. sticky 1777 rather than root-owned 0755: a multi-user
-    # install builds as the daemon (root), a single-user one as the
-    # invoking user, and this works for both.
+    # build. mkdir's default root-owned 0755 is what it must be: nix
+    # refuses to run at all against a world-writable build-dir ("Path
+    # /nix/tmp is world-writable or a symlink. That's not allowed for
+    # security."), and the daemon creates each per-build directory as root
+    # and hands it to a build user, so nothing else needs write access.
     - name: Build directory on the /nix volume
       if: ${{ runner.os == 'macOS' }}
       shell: bash
       run: |-
         set -x
         sudo mkdir -p /nix/tmp
-        sudo chmod 1777 /nix/tmp
 
     - name: Cachix Setup
       if: ${{ inputs.cachix_auth_token != '' }}
