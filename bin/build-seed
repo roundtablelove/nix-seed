@@ -124,23 +124,14 @@ artifact=store.squashfs
 echo '::endgroup::'
 
 # build the seed (registration + nix.conf are baked inside it under
-# .seed/). a pure evaluation: the seed is built from the flake's own
-# inputs and nothing else.
+# .seed/). what goes in comes from the flake's own inputs and nothing
+# else; on darwin the build itself additionally reaches /usr/bin/hdiutil
+# through __noChroot, which is why seed/action.yaml sets
+# `sandbox = relaxed` there. see DESIGN.md#macos.
 echo '::group::seed: build'
 out=$(nix build --print-build-logs --no-link --print-out-paths $seed)
 echo "Built seed $name:$tag ($system)"
 echo '::endgroup::'
-
-# on darwin the derivation yields the image's *inputs*, not the image:
-# hdiutil needs diskarbitrationd and cannot run in the nix sandbox, so
-# the packaging step happens here. see DESIGN.md#macos.
-if [[ $system =~ darwin ]]; then
-  echo '::group::seed: package'
-  image=$(mktemp -d)/image
-  "$(dirname "$0")"/make-dmg "$out" "$image/$artifact"
-  out=$image
-  echo '::endgroup::'
-fi
 
 # {{{ push
 

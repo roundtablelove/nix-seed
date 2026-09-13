@@ -21,8 +21,6 @@ on:
       - flake.nix
       - seed/action.yaml
       - bin/build-seed
-      # assembles the darwin image, so it decides that artefact's bytes
-      - bin/make-dmg
       - .github/workflows/seed-examples.yaml
   workflow_dispatch:
 

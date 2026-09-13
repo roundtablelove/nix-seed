@@ -50,10 +50,12 @@ in
   # the closure (already at /nix/store) is full of build-only deps.
   pathPackages ? [ nix ],
   nixConf ? "",
-  # squashfs zstd level. 15 is squashfs's default and the knee of the
-  # curve: ~3x faster to build than 19 for ~1% more size. drop toward
-  # 9 to trade image size for a much faster seed build; the consumer
-  # restores from the in-datacenter cache where size barely matters.
+  # zstd level: squashfs's compression on linux, the transport wrapper
+  # around the uncompressed image on darwin. 15 is squashfs's default and
+  # the knee of the curve: ~3x faster to build than 19 for ~1% more size.
+  # drop toward 9 to trade image size for a much faster seed build; the
+  # consumer restores from the in-datacenter cache where size barely
+  # matters.
   compressionLevel ? 9,
   # flake inputs (by name, at any depth) whose source is NOT baked
   # into the seed. removeAttrs also stops the collect recursion into
@@ -288,21 +290,113 @@ lib.throwIf (!stdenv.hostPlatform.isLinux && !stdenv.hostPlatform.isDarwin)
   ''
   (
     if stdenv.hostPlatform.isDarwin then
-      # darwin: the image is a .dmg assembled by hdiutil, which needs
-      # diskarbitrationd and so cannot run inside the nix sandbox. this
-      # derivation therefore produces the image's *inputs*, and
-      # bin/build-seed calls bin/make-dmg on them outside the sandbox.
-      # everything here still comes from closureInfo, so what goes into
-      # the image is determined by the evaluation exactly as on linux --
-      # only the packaging step escapes. see DESIGN.md#macos.
-      pkgs.runCommand name { inherit passthru; } ''
-        mkdir $out
-        cp ${closure}/store-paths $out/store-paths
-        cp ${closure}/registration $out/registration
-        # total-nar-size sizes the sparse image make-dmg creates
-        cp ${closure}/total-nar-size $out/nar-size
-        ln -s ${pathEnv} $out/env
-      ''
+      # darwin: the image is a .dmg written by hdiutil, which talks to
+      # diskarbitrationd and the DiskImages helper -- mach services the
+      # sandbox denies. the escape is *declared* rather than scripted
+      # around: __noChroot drops the sandbox for this derivation alone
+      # (and only where the builder sets `sandbox = relaxed`, which
+      # seed/action.yaml does on macOS), so the image stays a derivation
+      # output determined by closureInfo exactly as the squashfs is.
+      #
+      # the image is uncompressed (UDRO) inside a zstd stream that the
+      # consumer decodes once before attaching. a compressed UDIF image
+      # (lzfse or lzma) pays the codec on every read instead: attaching
+      # rust's lzfse image took 22-28s in every round against 6-11s for
+      # python's larger one, because attach walks the volume's metadata
+      # and the cost tracks inodes rather than bytes; evaluation off the
+      # mounted image then varied 5-9x run to run. uncompressed, attach
+      # is 1-5s and evaluation sits in a 1.5s band. see DESIGN.md#macos.
+      #
+      # the output is not byte-reproducible (hdiutil stamps a volume
+      # UUID and creation time), which is why .seed.lock anchors on the
+      # closure manifest and treats the image digest as a fetch pointer
+      # only. see DESIGN.md#closure-manifest.
+      pkgs.runCommand name
+        {
+          inherit passthru;
+          # hdiutil is /usr/bin/hdiutil, a host binary with no nixpkgs
+          # equivalent -- the one implicit host dependency, and the
+          # reason __noChroot is here at all. everything else is
+          # declared: pax builds the farm, zstd wraps the image.
+          __noChroot = true;
+          nativeBuildInputs = [
+            pkgs.pax
+            pkgs.zstd
+          ];
+        }
+        ''
+          mkdir $out
+
+          # the image is built from a hardlink farm handed to hdiutil,
+          # rather than by copying store paths into a mounted volume.
+          # copying through the mount serialises on HFS+'s single
+          # catalog B-tree lock: that is why four concurrent dittos came
+          # out *slower* than one on the largest closure (rust 276s
+          # against a 175s serial baseline) while helping the small ones
+          # (eval-heavy 34s, curl 56s). handing hdiutil a folder lets it
+          # write the filesystem image directly, so the mount, the copy
+          # and the sparse-to-UDRO convert all disappear, and the farm
+          # itself moves metadata only.
+          #
+          # the farm must sit on the same filesystem as the store: the
+          # installer gives /nix its own APFS volume, so linking out of
+          # /nix/store into a build directory under /private/tmp would
+          # cross devices and fail with EXDEV. that is what the builder's
+          # `build-dir` setting is for -- seed/action.yaml points it at a
+          # directory on the /nix volume, and this is where that matters.
+          farm=$TMPDIR/farm
+          mkdir -p $farm/store $farm/.seed
+
+          # /nix/var is a symlink to a fixed path outside the image, not
+          # a directory inside it: mount-seed attaches the whole image at
+          # /nix (the synthetic mountpoint accepts nothing else -- a
+          # subdirectory cannot be pre-created there to attach the store
+          # alone), so anything actually stored under /nix/var would sit
+          # behind the -shadow copy-on-write file like the rest of the
+          # volume. the symlink's target is real disk instead, created by
+          # mount-seed before attach; nix follows it transparently.
+          ln -s /private/var/nix-seed $farm/var
+
+          # hardlink every store path into the farm. in copy mode pax
+          # reads the names to act on from stdin, and -l links regular
+          # files instead of copying them, so this costs metadata only.
+          # feed it bare basenames from inside the store: pax recreates
+          # whatever path it is handed, so an absolute one would nest
+          # each tree under its own full path.
+          while IFS= read -r p; do printf '%s\n' "''${p##*/}"; done \
+            <${closure}/store-paths >$TMPDIR/names
+          ( cd /nix/store && pax -rw -l <$TMPDIR/names $farm/store/ )
+
+          cp ${closure}/registration $farm/.seed/registration
+          # an absolute symlink into the store, resolved once the image
+          # is attached at /nix -- the same contract as the squashfs
+          # pseudo-entry.
+          ln -s ${pathEnv} $farm/.seed/env
+
+          # one pass: hdiutil sizes the image from the folder and writes
+          # it read-only. a case-sensitive filesystem is mandatory -- the
+          # store holds paths that differ only in case, and APFS defaults
+          # to case-insensitive. HFS+ rather than APFS: `hdiutil attach`'s
+          # cost tracks file count, not bytes, and HFS+'s flat catalog
+          # B-tree is lighter per file to walk on attach than APFS's
+          # copy-on-write object map -- six rounds each way measured
+          # attach dropping from 4-5s to about 1.2-1.3s on both examples.
+          /usr/bin/hdiutil create -srcfolder $farm \
+            -fs 'Case-sensitive Journaled HFS+' -volname NixSeed \
+            -format UDRO -o $TMPDIR/store.dmg
+
+          # every directory in the farm inherited the store's read-only
+          # mode, and unlinking an entry needs write permission on its
+          # *parent*, so the tree has to be made writable before nix can
+          # remove the build directory it sits in.
+          chmod -R u+w $farm
+
+          # zstd for transport only: the registry blob and the cache
+          # entry would otherwise carry 3-4 GB of raw blocks. -T0 uses
+          # every core.
+          zstd -T0 -${toString compressionLevel} --quiet \
+            $TMPDIR/store.dmg -o $out/store.dmg.zst
+        ''
     else
       pkgs.runCommand name
         {

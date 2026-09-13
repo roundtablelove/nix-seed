@@ -35,9 +35,33 @@ runs:
     - name: Nix Setup
       uses: cachix/install-nix-action@v31
       with:
+        # darwin only, and only for the seed build: the image is written
+        # by hdiutil, which needs diskarbitrationd and the DiskImages
+        # helper. mkSeed's darwin branch declares that with __noChroot,
+        # which nix honours only under `sandbox = relaxed`. build-dir
+        # puts the build directory on the /nix volume so the hardlink
+        # farm mkSeed hands hdiutil can link out of /nix/store at all --
+        # the installer gives /nix its own APFS volume, and the default
+        # build directory under /private/tmp is a different one (EXDEV).
+        # see DESIGN.md#macos.
         extra_nix_config: |
           experimental-features = nix-command flakes
+          ${{ runner.os == 'macOS' && 'sandbox = relaxed' || '' }}
+          ${{ runner.os == 'macOS' && 'build-dir = /nix/tmp' || '' }}
           ${{ inputs.nix_conf }}
+
+    # nix creates each build directory inside build-dir but not build-dir
+    # itself, so the directory named above has to exist before the first
+    # build. sticky 1777 rather than root-owned 0755: a multi-user
+    # install builds as the daemon (root), a single-user one as the
+    # invoking user, and this works for both.
+    - name: Build directory on the /nix volume
+      if: ${{ runner.os == 'macOS' }}
+      shell: bash
+      run: |-
+        set -x
+        sudo mkdir -p /nix/tmp
+        sudo chmod 1777 /nix/tmp
 
     - name: Cachix Setup
       if: ${{ inputs.cachix_auth_token != '' }}
