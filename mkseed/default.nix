@@ -381,7 +381,21 @@ lib.throwIf (!stdenv.hostPlatform.isLinux && !stdenv.hostPlatform.isDarwin)
           # B-tree is lighter per file to walk on attach than APFS's
           # copy-on-write object map -- six rounds each way measured
           # attach dropping from 4-5s to about 1.2-1.3s on both examples.
-          /usr/bin/hdiutil create -srcfolder $farm \
+          #
+          # -anyowners because the farm's files are the store's, owned by
+          # root, while the build runs as a nixbld user: `create
+          # -srcfolder` tries to preserve ownership and prompts for
+          # authentication on "a file owned by someone other than the user
+          # creating the image", which in a build means dying with
+          # "hdiutil: create failed - user interaction required for
+          # authorization". Ownership in the image is moot anyway -- the
+          # consumer attaches with -owners off and gets its own, see
+          # DESIGN.md#macos -- so declining to preserve it costs nothing.
+          # -skipunreadable is deliberately NOT set: the store is
+          # world-readable, so an unreadable file means something is
+          # wrong and the build should say so rather than quietly ship an
+          # image with a hole in it.
+          /usr/bin/hdiutil create -srcfolder $farm -anyowners \
             -fs 'Case-sensitive Journaled HFS+' -volname NixSeed \
             -format UDRO -o $TMPDIR/store.dmg
 
