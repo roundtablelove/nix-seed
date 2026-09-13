@@ -375,7 +375,10 @@ lib.throwIf (!stdenv.hostPlatform.isLinux && !stdenv.hostPlatform.isDarwin)
           # HFS+ serialises metadata on its single catalog B-tree lock --
           # which is why this helps the small closures far more than the
           # large one -- it is still the fastest packaging measured.
-          xargs -P 4 -I {} bash -c 'ditto "$1" "$2/store/''${1##*/}"' \
+          # ditto by absolute path: a build's PATH is its declared inputs,
+          # and /usr/bin is not among them.
+          xargs -P 4 -I {} \
+            bash -c '/usr/bin/ditto "$1" "$2/store/''${1##*/}"' \
             _ {} $mnt <${closure}/store-paths
 
           cp ${closure}/registration $mnt/.seed/registration
