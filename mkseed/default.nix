@@ -399,11 +399,16 @@ lib.throwIf (!stdenv.hostPlatform.isLinux && !stdenv.hostPlatform.isDarwin)
             -fs 'Case-sensitive Journaled HFS+' -volname NixSeed \
             -format UDRO -o $TMPDIR/store.dmg
 
-          # every directory in the farm inherited the store's read-only
-          # mode, and unlinking an entry needs write permission on its
-          # *parent*, so the tree has to be made writable before nix can
-          # remove the build directory it sits in.
-          chmod -R u+w $farm
+          # NOTE: do not chmod the farm to make it removable. Its files
+          # are hardlinks, so their mode *is* the store's: a recursive
+          # chmod here would be a chmod of /nix/store itself. It fails
+          # rather than doing that ("Operation not permitted" -- the
+          # files are root's and the build is not), which is the only
+          # reason the attempt was harmless. Nothing needs it either: the
+          # farm's directories are pax's own, and the daemon removes the
+          # build directory as root, which ignores their read-only mode.
+          # If cleanup ever does need it, it is `find $farm -type d`,
+          # never the files.
 
           # zstd for transport only: the registry blob and the cache
           # entry would otherwise carry 3-4 GB of raw blocks. -T0 uses
