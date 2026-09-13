@@ -38,31 +38,12 @@ runs:
         # darwin only, and only for the seed build: the image is written
         # by hdiutil, which needs diskarbitrationd and the DiskImages
         # helper. mkSeed's darwin branch declares that with __noChroot,
-        # which nix honours only under `sandbox = relaxed`. build-dir
-        # puts the build directory on the /nix volume so the hardlink
-        # farm mkSeed hands hdiutil can link out of /nix/store at all --
-        # the installer gives /nix its own APFS volume, and the default
-        # build directory under /private/tmp is a different one (EXDEV).
+        # which nix honours only under `sandbox = relaxed`.
         # see DESIGN.md#macos.
         extra_nix_config: |
           experimental-features = nix-command flakes
           ${{ runner.os == 'macOS' && 'sandbox = relaxed' || '' }}
-          ${{ runner.os == 'macOS' && 'build-dir = /nix/tmp' || '' }}
           ${{ inputs.nix_conf }}
-
-    # nix creates each build directory inside build-dir but not build-dir
-    # itself, so the directory named above has to exist before the first
-    # build. mkdir's default root-owned 0755 is what it must be: nix
-    # refuses to run at all against a world-writable build-dir ("Path
-    # /nix/tmp is world-writable or a symlink. That's not allowed for
-    # security."), and the daemon creates each per-build directory as root
-    # and hands it to a build user, so nothing else needs write access.
-    - name: Build directory on the /nix volume
-      if: ${{ runner.os == 'macOS' }}
-      shell: bash
-      run: |-
-        set -x
-        sudo mkdir -p /nix/tmp
 
     - name: Cachix Setup
       if: ${{ inputs.cachix_auth_token != '' }}

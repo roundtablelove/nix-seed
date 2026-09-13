@@ -220,18 +220,35 @@ choice:
   sandboxed `runCommand`. The darwin branch of `mkSeed` therefore sets
   `__noChroot`, which Nix honours where the builder sets `sandbox = relaxed`
   - `seed/action.yaml` sets it on macOS only. The image is a derivation
-  output like the squashfs is, and `/usr/bin/hdiutil` is the single implicit
-  host dependency left: `pax`, which builds the hardlink farm handed to
-  `hdiutil`, and `zstd` are declared inputs.
+  output like the squashfs is, and `/usr/bin/hdiutil` and `/usr/bin/ditto`
+  are the only implicit host dependencies left; `zstd` is a declared input.
 
-  Two consequences follow. The farm has to live on the store's own
-  filesystem, because the installer gives `/nix` a separate APFS volume and
-  linking out of `/nix/store` into a build directory under `/private/tmp`
-  fails with `EXDEV`; the action's `build-dir = /nix/tmp` is what puts it
-  there. And the output is not byte-reproducible - `hdiutil` stamps a volume
-  UUID and a creation time - which is exactly why the
+  The output is not byte-reproducible - `hdiutil` stamps a volume UUID and a
+  creation time - which is exactly why the
   [closure manifest](#closure-manifest), not the image digest, is the
   anchor.
+
+  **Copy into a mounted volume, don't hand `hdiutil` a folder.** Store
+  paths are dittoed into a mounted read-write sparse image, four workers
+  under `xargs -P 4`, and the result converted to UDRO. Building the image
+  in one pass from a hardlink farm with `create -srcfolder` avoids the
+  mount, the copy and the convert entirely and ought to win; measured, it
+  lost on three of four examples. Packaging went eval-heavy 34s -> 102s,
+  curl 56s -> 190s and python 120s -> 285s, with only rust improving (276s
+  -> 190s). The farm also has to live on the store's own filesystem - the
+  installer gives `/nix` a separate APFS volume, so linking out of
+  `/nix/store` into a build directory under `/private/tmp` fails with
+  `EXDEV`, which costs a `build-dir` setting on the builder. Neither the
+  farm nor that setting is worth it at those times.
+
+  Ownership is the subtlety in either approach. The store is root's and a
+  build runs as a `nixbld` user, so anything preserving ownership asks
+  `hdiutil` to authenticate for files it does not own - fatal in a build
+  ("user interaction required for authorization"; outside nix it hangs on
+  the prompt for 38 minutes instead). Attaching the scratch volume
+  `-owners off` removes the question: the volume presents as the copying
+  user's. It is moot in the end, because the consumer attaches `-owners
+  off` too.
 
   Declaring the escape was chosen over the alternatives after each was
   tested. Nothing creates an HFS+ filesystem in userspace: Apple's

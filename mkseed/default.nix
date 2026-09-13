@@ -314,38 +314,52 @@ lib.throwIf (!stdenv.hostPlatform.isLinux && !stdenv.hostPlatform.isDarwin)
       pkgs.runCommand name
         {
           inherit passthru;
-          # hdiutil is /usr/bin/hdiutil, a host binary with no nixpkgs
-          # equivalent -- the one implicit host dependency, and the
-          # reason __noChroot is here at all. everything else is
-          # declared: pax builds the farm, zstd wraps the image.
+          # hdiutil and ditto are /usr/bin binaries with no nixpkgs
+          # equivalent -- the only implicit host dependencies, and the
+          # reason __noChroot is here at all. zstd is declared; xargs and
+          # bash come from stdenv.
           __noChroot = true;
-          nativeBuildInputs = [
-            pkgs.pax
-            pkgs.zstd
-          ];
+          nativeBuildInputs = [ pkgs.zstd ];
         }
         ''
           mkdir $out
 
-          # the image is built from a hardlink farm handed to hdiutil,
-          # rather than by copying store paths into a mounted volume.
-          # copying through the mount serialises on HFS+'s single
-          # catalog B-tree lock: that is why four concurrent dittos came
-          # out *slower* than one on the largest closure (rust 276s
-          # against a 175s serial baseline) while helping the small ones
-          # (eval-heavy 34s, curl 56s). handing hdiutil a folder lets it
-          # write the filesystem image directly, so the mount, the copy
-          # and the sparse-to-UDRO convert all disappear, and the farm
-          # itself moves metadata only.
-          #
-          # the farm must sit on the same filesystem as the store: the
-          # installer gives /nix its own APFS volume, so linking out of
-          # /nix/store into a build directory under /private/tmp would
-          # cross devices and fail with EXDEV. that is what the builder's
-          # `build-dir` setting is for -- seed/action.yaml points it at a
-          # directory on the /nix volume, and this is where that matters.
-          farm=$TMPDIR/farm
-          mkdir -p $farm/store $farm/.seed
+          # store paths are copied into a mounted read-write volume,
+          # which is then converted to UDRO. Handing hdiutil a hardlink
+          # farm with `create -srcfolder` writes the filesystem in one
+          # pass and looks like it should win, but measured on macos-15
+          # it lost on three of four examples -- the packaging phase went
+          # eval-heavy 34s -> 102s, curl 56s -> 190s, python 120s -> 285s,
+          # with only rust (276s -> 190s) improving. see DESIGN.md#macos.
+          mnt=$TMPDIR/mnt
+
+          # size the sparse image from the closure's total nar size, with
+          # headroom for filesystem overhead. sparse means unused blocks
+          # cost nothing, so being generous here is free.
+          megs=$(($(cat ${closure}/total-nar-size) * 3 / 2000000 + 512))
+
+          # a case-sensitive filesystem is mandatory: the store holds
+          # paths that differ only in case, and APFS defaults to
+          # case-insensitive. HFS+ rather than APFS: `hdiutil attach`'s
+          # cost tracks file count, not bytes, and HFS+'s flat catalog
+          # B-tree is lighter per file to walk on attach than APFS's
+          # copy-on-write object map -- six rounds each way measured
+          # attach dropping from 4-5s to about 1.2-1.3s on both examples.
+          /usr/bin/hdiutil create -size ''${megs}m \
+            -fs 'Case-sensitive Journaled HFS+' \
+            -volname NixSeed -type SPARSE -o $TMPDIR/rw
+
+          # -owners off: the volume presents as the mounting user's, so
+          # ditto copying root-owned store files as a nixbld user has no
+          # ownership to fail to preserve. The consumer attaches with
+          # -owners off too, so ownership in the image is moot either
+          # way -- see DESIGN.md#macos. Without it hdiutil wants to
+          # authenticate for files it does not own, which in a build
+          # means "user interaction required for authorization".
+          /usr/bin/hdiutil attach $TMPDIR/rw.sparseimage -mountpoint $mnt \
+            -owners off -nobrowse -noautoopen
+
+          mkdir -p $mnt/store $mnt/.seed
 
           # /nix/var is a symlink to a fixed path outside the image, not
           # a directory inside it: mount-seed attaches the whole image at
@@ -355,60 +369,24 @@ lib.throwIf (!stdenv.hostPlatform.isLinux && !stdenv.hostPlatform.isDarwin)
           # behind the -shadow copy-on-write file like the rest of the
           # volume. the symlink's target is real disk instead, created by
           # mount-seed before attach; nix follows it transparently.
-          ln -s /private/var/nix-seed $farm/var
+          ln -s /private/var/nix-seed $mnt/var
 
-          # hardlink every store path into the farm. in copy mode pax
-          # reads the names to act on from stdin, and -l links regular
-          # files instead of copying them, so this costs metadata only.
-          # feed it bare basenames from inside the store: pax recreates
-          # whatever path it is handed, so an absolute one would nest
-          # each tree under its own full path.
-          while IFS= read -r p; do printf '%s\n' "''${p##*/}"; done \
-            <${closure}/store-paths >$TMPDIR/names
-          ( cd /nix/store && pax -rw -l <$TMPDIR/names $farm/store/ )
+          # four concurrent ditto workers. This is I/O bound, and while
+          # HFS+ serialises metadata on its single catalog B-tree lock --
+          # which is why this helps the small closures far more than the
+          # large one -- it is still the fastest packaging measured.
+          xargs -P 4 -I {} bash -c 'ditto "$1" "$2/store/''${1##*/}"' \
+            _ {} $mnt <${closure}/store-paths
 
-          cp ${closure}/registration $farm/.seed/registration
+          cp ${closure}/registration $mnt/.seed/registration
           # an absolute symlink into the store, resolved once the image
           # is attached at /nix -- the same contract as the squashfs
           # pseudo-entry.
-          ln -s ${pathEnv} $farm/.seed/env
+          ln -s ${pathEnv} $mnt/.seed/env
 
-          # one pass: hdiutil sizes the image from the folder and writes
-          # it read-only. a case-sensitive filesystem is mandatory -- the
-          # store holds paths that differ only in case, and APFS defaults
-          # to case-insensitive. HFS+ rather than APFS: `hdiutil attach`'s
-          # cost tracks file count, not bytes, and HFS+'s flat catalog
-          # B-tree is lighter per file to walk on attach than APFS's
-          # copy-on-write object map -- six rounds each way measured
-          # attach dropping from 4-5s to about 1.2-1.3s on both examples.
-          #
-          # -anyowners because the farm's files are the store's, owned by
-          # root, while the build runs as a nixbld user: `create
-          # -srcfolder` tries to preserve ownership and prompts for
-          # authentication on "a file owned by someone other than the user
-          # creating the image", which in a build means dying with
-          # "hdiutil: create failed - user interaction required for
-          # authorization". Ownership in the image is moot anyway -- the
-          # consumer attaches with -owners off and gets its own, see
-          # DESIGN.md#macos -- so declining to preserve it costs nothing.
-          # -skipunreadable is deliberately NOT set: the store is
-          # world-readable, so an unreadable file means something is
-          # wrong and the build should say so rather than quietly ship an
-          # image with a hole in it.
-          /usr/bin/hdiutil create -srcfolder $farm -anyowners \
-            -fs 'Case-sensitive Journaled HFS+' -volname NixSeed \
+          /usr/bin/hdiutil detach $mnt
+          /usr/bin/hdiutil convert $TMPDIR/rw.sparseimage \
             -format UDRO -o $TMPDIR/store.dmg
-
-          # NOTE: do not chmod the farm to make it removable. Its files
-          # are hardlinks, so their mode *is* the store's: a recursive
-          # chmod here would be a chmod of /nix/store itself. It fails
-          # rather than doing that ("Operation not permitted" -- the
-          # files are root's and the build is not), which is the only
-          # reason the attempt was harmless. Nothing needs it either: the
-          # farm's directories are pax's own, and the daemon removes the
-          # build directory as root, which ignores their read-only mode.
-          # If cleanup ever does need it, it is `find $farm -type d`,
-          # never the files.
 
           # zstd for transport only: the registry blob and the cache
           # entry would otherwise carry 3-4 GB of raw blocks. -T0 uses
