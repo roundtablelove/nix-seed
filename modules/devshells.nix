@@ -38,6 +38,11 @@
           help = "collect build-* workflow timings into bench/workflows.csv";
         }
         {
+          name = "bench-stats";
+          command = ''python -m bench.stats "$@"'';
+          help = "spread of a step's timings, to size a change against the noise";
+        }
+        {
           name = "bench-graph-jobs";
           command = ''python -m bench.graph_jobs "$@"'';
           help = "graph job wall clock from bench/workflows.csv";
