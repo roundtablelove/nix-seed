@@ -8,6 +8,7 @@ set -eu -o pipefail
 seedAttr=seed
 registry=ghcr.io
 imageName=
+push=1
 
 usage() {
   cat <<EOF
@@ -23,6 +24,12 @@ Options:
     (default: <gh repo nameWithOwner>/<PATH relative to repo root>)
   --tag TAG
     add an extra tag such as IMAGE_NAME:latest
+  --no-push
+    build and package only: skip the registry push and the lock commit
+    that records its digest. for timing the build itself -- repeated
+    pushes of a multi-GB seed trip the registry's secondary rate limit,
+    which fails the job long before enough samples exist to measure
+    anything. needs no registry credentials.
 Args:
   PATH  path to flake (default=.)
 EOF
@@ -48,6 +55,10 @@ while [[ $# -gt 0 ]]; do
   --tag)
     tags+=("$2")
     shift 2
+    ;;
+  --no-push)
+    push=
+    shift
     ;;
   --)
     shift
@@ -95,7 +106,7 @@ repository=$registry/$imageName
 
 # {{{ sanity check
 
-[[ -n ${REGISTRY_USER:-} && -n ${REGISTRY_PASS:-} ]] || {
+[[ -z $push ]] || [[ -n ${REGISTRY_USER:-} && -n ${REGISTRY_PASS:-} ]] || {
   echo >&2 "REGISTRY_USER and REGISTRY_PASS must be set"
   exit 1
 }
@@ -141,6 +152,14 @@ if [[ $system =~ darwin ]]; then
   out=$image
   echo '::endgroup::'
 fi
+
+# everything below publishes: the registry push and the lock commit that
+# records its digest. --no-push stops here, having already emitted the
+# eval/build/package timings, which is all a benchmark run wants.
+[[ -n $push ]] || {
+  echo "seed built at $out (--no-push: not pushed, lock not updated)"
+  exit 0
+}
 
 # {{{ push
 

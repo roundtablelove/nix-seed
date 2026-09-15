@@ -19,6 +19,12 @@ inputs:
     default: ghcr.io
   github_token:
     description: GitHub Token for registry login
+  push:
+    description: >-
+      Push the seed and commit its lock. Set false to build and package
+      only, for timing runs: repeated pushes of a multi-GB seed trip the
+      registry's secondary rate limit.
+    default: "true"
 
   cachix_name:
     description: Cachix cache name
@@ -59,4 +65,5 @@ runs:
         "$GITHUB_ACTION_PATH"/../bin/build-seed \
           --seed-attr ${{ inputs.seed_attr }} \
           --registry ${{ inputs.registry }} \
+          ${{ inputs.push == 'false' && '--no-push' || '' }} \
           ${{ inputs.path }}
