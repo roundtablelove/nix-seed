@@ -32,7 +32,28 @@ runs:
         # becoming dashes (mirrors bin/build-seed)
         suffix=${{ inputs.seed_attr }}
         lock=${{ inputs.path }}/.${suffix//./-}.lock
-        digest=$(jq -er --arg s "$system" '.systems[$s]' "$lock")
+
+        # a bare `jq -er` here exits 1 with nothing on stdout or stderr,
+        # which in the log looks like the step simply died. say which
+        # file, which system, and what the lock does offer instead.
+        [[ -f $lock ]] || {
+          echo "::error::No seed lock at $lock. Nothing has published a" \
+            "seed for ${{ inputs.path }} yet -- run the seed-examples" \
+            "workflow (or bin/build-seed ${{ inputs.path }}) first."
+          exit 1
+        }
+        if ! digest=$(jq -er --arg s "$system" '.systems[$s]' "$lock"); then
+          have=$(jq -r '.systems | keys | join(", ") | if . == "" then
+            "(none)" else . end' "$lock")
+          tag=$(jq -r '.tag // "(none)"' "$lock")
+          echo "::error::$lock has no seed for $system. It records: $have" \
+            "(at tag $tag). Either this system was never seeded, or its" \
+            "entry was dropped: build-seed resets .systems whenever .tag" \
+            "changes, so a seed run for a newer commit clears the digests" \
+            "the other systems recorded for the old one. Re-run" \
+            "seed-examples for $system to put it back."
+          exit 1
+        fi
         echo "lock=$lock" >>"$GITHUB_OUTPUT"
         echo "digest=$digest" >>"$GITHUB_OUTPUT"
 
