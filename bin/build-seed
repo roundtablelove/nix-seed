@@ -9,6 +9,7 @@ seedAttr=seed
 registry=ghcr.io
 imageName=
 push=1
+record=
 
 usage() {
   cat <<EOF
@@ -24,9 +25,14 @@ Options:
     (default: <gh repo nameWithOwner>/<PATH relative to repo root>)
   --tag TAG
     add an extra tag such as IMAGE_NAME:latest
+  --record FILE
+    write this build's digest record to FILE: the one thing downstream
+    needs. bin/write-seed-lock turns a cycle's worth of these into a
+    single .seed.lock commit naming every system at once. no effect
+    under --no-push, which produces no digest to record.
   --no-push
-    build and package only: skip the registry push and the lock commit
-    that records its digest. for timing the build itself -- repeated
+    build and package only: skip the registry push and the digest
+    record that names it. for timing the build itself -- repeated
     pushes of a multi-GB seed trip the registry's secondary rate limit,
     which fails the job long before enough samples exist to measure
     anything. needs no registry credentials.
@@ -54,6 +60,10 @@ while [[ $# -gt 0 ]]; do
     ;;
   --tag)
     tags+=("$2")
+    shift 2
+    ;;
+  --record)
+    record=$2
     shift 2
     ;;
   --no-push)
@@ -87,14 +97,17 @@ dir=${1:-.}
 # still a legal image name and filename.
 suffix=${seedAttr//./-}
 
+# path of $dir relative to the repo root ("" at the root). hoisted out
+# of the image-name branch below: --record names the flake by this path,
+# so it is needed even when --image-name supplied the name outright.
+rel=$(git -C $dir rev-parse --show-prefix)
+
 if [[ -z $imageName ]]; then
   command -v gh >/dev/null || {
     echo >&2 "<gh> github command line client required to resolve image name"
     exit 1
   }
   repository=$(cd $dir && gh repo view --json nameWithOwner --jq .nameWithOwner)
-  # path of $dir relative to the repo root ("" at the root)
-  rel=$(git -C $dir rev-parse --show-prefix)
   imageName=$repository${rel:+/${rel%/}}/$suffix
 fi
 # ghcr requires lowercase repository names. tr, not ${x,,}: macOS runners
@@ -114,7 +127,9 @@ repository=$registry/$imageName
 # }}}
 
 seed=$dir#$seedAttr
-lock=$dir/.$suffix.lock
+# the lock's filename is decided here and carried in the digest record,
+# so bin/write-seed-lock never has to re-derive the naming rule above.
+lock=.$suffix.lock
 
 echo '::group::seed: eval'
 eval "$(nix eval --impure --json --apply 'seed: {
@@ -153,11 +168,11 @@ if [[ $system =~ darwin ]]; then
   echo '::endgroup::'
 fi
 
-# everything below publishes: the registry push and the lock commit that
-# records its digest. --no-push stops here, having already emitted the
+# everything below publishes: the registry push and the digest record
+# that names it. --no-push stops here, having already emitted the
 # eval/build/package timings, which is all a benchmark run wants.
 [[ -n $push ]] || {
-  echo "seed built at $out (--no-push: not pushed, lock not updated)"
+  echo "seed built at $out (--no-push: not pushed, nothing recorded)"
   exit 0
 }
 
@@ -218,64 +233,28 @@ echo "pushed $repository@$digest"
 
 # }}}
 
-# {{{ update seed lock
+# {{{ record the digest
 
-# fresh object: drops legacy keys, and a tag change invalidates the
-# recorded digests of the other systems
-update_lock() {
-  [[ -f $lock ]] || printf '{}\n' >$lock
-  jq --sort-keys \
-    --arg repository "$repository" --arg tag "$tag" \
-    --arg system "$system" --arg digest "$digest" \
-    '{
-      repository: $repository,
-      tag: $tag,
-      systems: ((if .tag == $tag then .systems else {} end) // {}
-        | .[$system] = $digest)
-    }' $lock >$lock.tmp
-  mv $lock.tmp $lock
+# this leg's digest is the only thing anything downstream needs, and
+# writing it to a file rather than committing a lock here is what makes
+# a cycle atomic. one leg cannot know what the others built, so a lock
+# written from inside one could only ever name one system -- which is
+# precisely the half-written state that used to reach master, where a
+# commit landing between the two legs captured a lock naming a single
+# system. bin/write-seed-lock turns a whole cycle's records into one
+# commit, or none.
+[[ -n $record ]] || {
+  echo "recorded nothing (--record not given): $repository@$digest"
+  exit 0
 }
 
-echo '::group::seed: lock'
-git=(git -C $dir)
-"${git[@]}" config user.email >/dev/null || git+=(
-  -c user.name='github-actions[bot]'
-  -c user.email='41898282+github-actions[bot]@users.noreply.github.com'
-)
-# CI checkouts are detached, so the branch cannot be read from HEAD
-branch=${GITHUB_REF_NAME:-$("${git[@]}" branch --show-current)}
-
-# parallel per-system builds race on the push: rebuild the lock on top
-# of the freshly pulled state each attempt. the loser retries, so the
-# bound must exceed the number of systems seeded concurrently -- three
-# now that darwin joined the matrix, times the examples sharing a lock.
-committed=
-for _ in $(seq 1 10); do
-  "${git[@]}" pull --rebase origin $branch
-  update_lock
-  "${git[@]}" add -f ".$suffix.lock"
-  if "${git[@]}" diff --cached --quiet; then
-    committed=1 # nothing new to record
-    break
-  fi
-  "${git[@]}" commit --message "chore($suffix): lock $system"
-  if "${git[@]}" push origin HEAD:$branch; then
-    committed=1
-    break
-  fi
-  # lost the race: drop the commit and our lock edit, then retry
-  "${git[@]}" reset HEAD^
-  if [[ -n $("${git[@]}" ls-files ".$suffix.lock") ]]; then
-    "${git[@]}" checkout -- ".$suffix.lock"
-  else
-    rm $lock
-  fi
-done
-[[ -n $committed ]] || {
-  echo >&2 "build-seed: could not push $lock"
-  exit 1
-}
-echo "seed.lock: $repository:$tag $system = $digest"
+echo '::group::seed: record'
+jq -n --sort-keys \
+  --arg path "${rel%/}" --arg lock "$lock" \
+  --arg repository "$repository" --arg tag "$tag" \
+  --arg system "$system" --arg digest "$digest" \
+  '{ $path, $lock, $repository, $tag, $system, $digest }' >"$record"
+cat "$record"
 echo '::endgroup::'
 
 # }}}

@@ -1,0 +1,262 @@
+#!/usr/bin/env bash
+# shellcheck disable=2086
+
+set -eu -o pipefail
+
+# {{{ getopt
+
+repo=.
+expect=
+attempts=3
+push=1
+
+usage() {
+  cat <<EOF
+Usage:
+  write-seed-lock [ OPTIONS ] RECORDS
+Options:
+  --repo DIR
+    git worktree holding the locks (default: $repo)
+  --expect JSON
+    JSON array of flake paths ("examples/rust") that must each be
+    recorded. a cycle whose records are short -- an artifact that never
+    uploaded, a leg that fell out of the matrix -- then fails here,
+    rather than quietly committing a lock with a system missing.
+  --attempts N
+    pushes to attempt before giving up (default: $attempts)
+  --no-push
+    write the locks and commit, but do not push. for tests.
+Args:
+  RECORDS  directory of digest records from build-seed --record,
+           searched recursively (one per flake per system)
+
+Writes each flake's .seed.lock whole, from the records alone, and
+commits every one of them together. A cycle lands as a single commit
+naming every system it built, or as no commit at all: no consumer ever
+reads a lock that names only some of them.
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+  --repo)
+    repo=$2
+    shift 2
+    ;;
+  --expect)
+    expect=$2
+    shift 2
+    ;;
+  --attempts)
+    attempts=$2
+    shift 2
+    ;;
+  --no-push)
+    push=
+    shift
+    ;;
+  --)
+    shift
+    break
+    ;;
+  -*)
+    usage
+    exit 1
+    ;;
+  *)
+    break
+    ;;
+  esac
+done
+
+[[ $# -eq 1 ]] || {
+  usage
+  exit 1
+}
+records=$1
+
+[[ -d $records ]] || {
+  echo >&2 "write-seed-lock: no such records directory: $records"
+  exit 1
+}
+
+# }}}
+
+# {{{ collect and validate
+
+# records arrive one per artifact, each in its own directory, so search
+# rather than glob. -print0/-d '' so a path with a space cannot split.
+found=()
+while IFS= read -r -d '' f; do found+=("$f"); done < <(
+  find "$records" -type f -name '*.json' -print0 | sort -z
+)
+[[ ${#found[@]} -gt 0 ]] || {
+  echo >&2 "write-seed-lock: no digest records under $records"
+  exit 1
+}
+
+# every consistency rule a cycle's records must satisfy, in one pass.
+# each is a thing that has actually gone wrong or would go unnoticed:
+# a short upload, two legs disagreeing about what they built, the same
+# system recorded twice.
+# shellcheck disable=2016 # a jq program: $-names are jq's, not the shell's
+validate='
+  def fail(msg): (msg | halt_error(1));
+
+  . as $records
+  | ($records | map(select(
+      (.path | type) != "string" or (.lock | type) != "string"
+      or (.repository | type) != "string" or (.tag | type) != "string"
+      or (.system | type) != "string" or (.digest | type) != "string"
+    ))) as $malformed
+  | if ($malformed | length) > 0
+    then fail("malformed digest record: \($malformed[0] | tojson)")
+    else . end
+
+  | ($records | group_by(.path)) as $groups
+
+  # one tag per cycle: every leg evaluated the same source. a mismatch
+  # means records from two different cycles reached the same writer.
+  | ($records | map(.tag) | unique) as $tags
+  | if ($tags | length) != 1
+    then fail("records disagree on tag: \($tags | join(", "))")
+    else . end
+
+  | ($groups | map(
+      . as $g | ($g[0].path) as $path
+      | if ($g | map(.repository) | unique | length) != 1
+        then fail("\($path): records disagree on repository")
+        else . end
+      | if ($g | map(.lock) | unique | length) != 1
+        then fail("\($path): records disagree on lock filename")
+        else . end
+      | if ($g | map(.system) | unique | length) != ($g | length)
+        then fail("\($path): the same system is recorded twice")
+        else . end
+    )) as $_
+
+  # every flake must have been built for the same set of systems: a leg
+  # that silently failed to upload shows up here even when the job-level
+  # gate passed.
+  | ($groups | map(.[0].path)) as $paths
+  | ($groups | map([.[].system] | sort) | unique) as $systemSets
+  | if ($systemSets | length) != 1
+    then fail("flakes were built for different systems: "
+      + ($groups | map("\(.[0].path) = [\([.[].system] | sort | join(", "))]")
+        | join("; ")))
+    else . end
+
+  | $groups
+'
+
+echo "write-seed-lock: ${#found[@]} digest records:"
+printf '  %s\n' "${found[@]}"
+
+groups=$(jq -s "$validate" "${found[@]}")
+
+if [[ -n $expect ]]; then
+  missing=$(jq -n --argjson want "$expect" --argjson got "$groups" '
+    ($got | map(.[0].path)) as $have
+    | { missing: ($want - $have), unexpected: ($have - $want) }
+  ')
+  if [[ $(jq -r '(.missing + .unexpected) | length' <<<"$missing") != 0 ]]; then
+    echo >&2 "write-seed-lock: records do not match --expect."
+    echo >&2 "  never recorded: $(jq -rc .missing <<<"$missing")"
+    echo >&2 "  not expected:   $(jq -rc .unexpected <<<"$missing")"
+    exit 1
+  fi
+fi
+
+tag=$(jq -r '.[0][0].tag' <<<"$groups")
+
+# }}}
+
+# {{{ stage the locks
+
+# built once, from the records alone -- never merged with what is on
+# disk, because there is no longer any state on disk worth preserving:
+# a cycle's records are the whole truth about that cycle. re-applied
+# verbatim after each rebase, so the loop below can retry freely.
+staging=$(mktemp -d)
+trap 'rm -rf "$staging"' EXIT
+
+locks=()
+while IFS=$'\t' read -r file group; do
+  locks+=("$file")
+  mkdir -p "$staging/$(dirname "$file")"
+  jq --sort-keys '
+    { repository: .[0].repository,
+      systems: (map({ key: .system, value: .digest }) | from_entries),
+      tag: .[0].tag,
+      version: 1 }
+  ' <<<"$group" >"$staging/$file"
+done < <(jq -r '.[] | "\(.[0].path)/\(.[0].lock)\t\(tojson)"' <<<"$groups")
+
+echo "write-seed-lock: staged ${#locks[@]} locks at tag ${tag:0:8}"
+
+# }}}
+
+# {{{ commit
+
+echo '::group::seed: lock'
+
+git=(git -C "$repo")
+"${git[@]}" config user.email >/dev/null || git+=(
+  -c user.name='github-actions[bot]'
+  -c user.email='41898282+github-actions[bot]@users.noreply.github.com'
+)
+# CI checkouts are detached, so the branch cannot be read from HEAD
+branch=${GITHUB_REF_NAME:-$("${git[@]}" branch --show-current)}
+
+message="chore(seed): lock ${#locks[@]} seeds at ${tag:0:8}"
+[[ -z ${GITHUB_RUN_ID:-} ]] ||
+  message="$message
+
+Seed-Run: $GITHUB_RUN_ID"
+
+apply() {
+  local file
+  for file in "${locks[@]}"; do
+    mkdir -p "$repo/$(dirname "$file")"
+    cp "$staging/$file" "$repo/$file"
+  done
+}
+
+# only one writer runs per cycle now, so this no longer races its own
+# siblings -- what it must survive is an unrelated push landing in the
+# seconds between the pull and the push. rare, but losing that race
+# without a retry would discard a whole cycle of multi-GB builds that
+# have already been paid for. the locks are re-applied after each
+# rebase, since the pull can bring in a competing edit.
+sha=
+for _ in $(seq 1 $attempts); do
+  [[ -z $push ]] || "${git[@]}" pull --rebase origin $branch
+  apply
+  "${git[@]}" add -f -- "${locks[@]}"
+  if "${git[@]}" diff --cached --quiet; then
+    # every digest already recorded: a re-seed that reproduced itself
+    sha=$("${git[@]}" rev-parse HEAD)
+    echo "write-seed-lock: locks already current, nothing to commit"
+    break
+  fi
+  "${git[@]}" commit --quiet --message "$message"
+  sha=$("${git[@]}" rev-parse HEAD)
+  [[ -n $push ]] || break
+  if "${git[@]}" push origin HEAD:$branch; then
+    break
+  fi
+  # lost the race: drop our commit entirely and rebuild on what landed
+  "${git[@]}" reset --hard HEAD^
+  sha=
+done
+
+[[ -n $sha ]] || {
+  echo >&2 "write-seed-lock: could not push the lock commit in $attempts attempts"
+  exit 1
+}
+
+printf '%s\n' "$sha"
+[[ -z ${GITHUB_OUTPUT:-} ]] || echo "sha=$sha" >>"$GITHUB_OUTPUT"
+echo '::endgroup::'
+
+# }}}
