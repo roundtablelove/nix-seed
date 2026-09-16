@@ -126,7 +126,17 @@ def matrix_os(workflows: Path, workflow: str, job: str = "build") -> set[str]:
     workflow's own job key -- "build" for the build-* workflows,
     "seed" for seed-examples."""
     with (workflows / f"{workflow}.yaml").open() as f:
-        return set(yaml.safe_load(f)["jobs"][job]["strategy"]["matrix"]["os"])
+        jobs = yaml.safe_load(f)["jobs"]
+    try:
+        return set(jobs[job]["strategy"]["matrix"]["os"])
+    except KeyError as e:
+        # a bare KeyError here reads as a bug in the grapher rather than
+        # as what it is: the workflow's matrix job was renamed or lost
+        # its os matrix out from under this lookup.
+        raise SystemExit(
+            f"{workflow}.yaml has no os matrix under jobs.{job} "
+            f"(missing {e}); it has jobs: {', '.join(sorted(jobs))}"
+        ) from e
 
 
 # a commit touching one of these can change what the graphs measure;

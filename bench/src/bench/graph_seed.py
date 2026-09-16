@@ -47,7 +47,13 @@ STEPS = (
     "seed: package",
     "seed: install oras",
     "seed: push",
+    # "seed: lock" ended here: a leg used to commit its own lock, and
+    # now records a digest instead, with one lock job per cycle doing
+    # the commit. kept so runs from before that still draw their bar.
     "seed: lock",
+    "seed: record",
+    "Record digest",
+    "Upload digest",
 )
 PHASES = tuple(s for s in STEPS if s.startswith("seed: "))
 

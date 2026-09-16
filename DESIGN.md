@@ -73,41 +73,46 @@ share the same anchor.
 ## Building from Seed
 
 Consuming projects maintain a `.seed.lock` recording, per target system, the
-[closure manifest](#closure-manifest) digest a build must reproduce and the
-mechanism that delivers it:
+digest of the seed a build must fetch:
 
 ```json
 {
-  "version": 1,
+  "repository": "ghcr.io/roundtablelove/nix-seed/examples/rust/seed",
   "systems": {
-    "aarch64-linux": {
-      "kind": "oci",
-      "manifest": "sha256:...",
-      "image": "sha256:..."
-    },
-    "x86_64-linux": {
-      "kind": "oci",
-      "manifest": "sha256:...",
-      "image": "sha256:..."
-    }
-  }
+    "aarch64-darwin": "sha256:...",
+    "aarch64-linux": "sha256:..."
+  },
+  "tag": "3fbe9ad6782630d99fb5ce26213d1b2a70d55407",
+  "version": 1
 }
 ```
 
 - `version` gates format migrations. A consumer that does not recognise the
   value MUST fail rather than guess.
-- `kind` names the delivery mechanism. `oci` is the only value today; the
-  [macOS](#macos) options would add others.
-- `manifest` is the authoritative anchor and is independent of `kind`.
-- `image` is the fetch pointer for `kind: oci`, and is not authoritative.
+- `repository` is where the seeds live. One repository serves every system.
+- `systems` maps a system to the digest of its seed. The key already says
+  which artefact the digest is for (`*-linux` squashfs, `*-darwin` dmg, see
+  [macOS](#macos)), so no separate `kind` discriminator is needed.
+- `tag` is the revision every digest in this file was built from. It is one
+  value for the whole file, not one per system: see below.
 
-`version` and `kind` are present while a single mechanism exists because
-`.seed.lock` is committed by every consuming project: adding a discriminator
-later is a migration across all of them.
+`version` is present while a single format exists because `.seed.lock` is
+committed by every consuming project: adding a discriminator later is a
+migration across all of them.
 
-If no entry exists for a system, [the seed is built](#building-the-seed), the
-resulting entry is recorded in a new commit containing the updated `.seed.lock`,
-and the normal build proceeds.
+The [closure manifest](#closure-manifest) is the intended trust anchor, and is
+not yet recorded here. Until it is, the digest is both the fetch pointer and
+the only thing verified.
+
+A lock is written **whole, or not at all**. Every system a cycle built is
+recorded in a single commit sharing one `tag`; if any system fails to build,
+nothing is written and the lock stays on the previous revision. This matters
+because the alternative was tried: when each system committed its own entry as
+it finished, the lock spent the window between the first and last system naming
+only some of them, and any commit landing in that window — or any second cycle
+running concurrently — captured or clobbered a partial lock. A consumer that
+finds no entry for its system can therefore conclude the system was never
+seeded, rather than that it is reading a lock mid-write.
 
 ### Delivery
 

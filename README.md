@@ -245,6 +245,17 @@ Add `nix-seed` to your `flake.nix` and expose `seed` in `packages`:
 
 ### .github/workflows/seed.yaml
 
+Two jobs, not one. Each matrix leg publishes its own system's seed and records
+the digest; a single `lock` job then commits every system's digest to
+`.seed.lock` together. A leg cannot write the lock itself, because it only ever
+knows its own system — one that tried would leave the lock naming a single
+system for as long as its siblings took to finish, and anything reading the
+lock in that window would find its own system missing.
+
+`needs.seed.result` on a matrix job is the aggregate, so the `if` below is the
+whole rule: if any system fails to publish, no lock is written and the lock
+stays on the previous revision.
+
 ```yaml
 name: seed
 
@@ -255,6 +266,13 @@ on:
     paths:
       - flake.lock
   workflow_dispatch:
+
+# one publishing cycle at a time: two overlapping cycles carry different
+# revisions, and each would write its own over the other's
+concurrency:
+  group: seed-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   seed:
     permissions:
@@ -262,6 +280,9 @@ jobs:
       id-token: write
       packages: write
     strategy:
+      # every system reports its own failure in one run; the lock is
+      # still all-or-nothing, because the job below simply will not run
+      fail-fast: false
       matrix:
         os:
           - ubuntu-22.04
@@ -272,9 +293,30 @@ jobs:
       - uses: roundtablelove/nix-seed/seed
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
+
+  lock:
+    needs: seed
+    if: ${{ needs.seed.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      # the only job that commits
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: roundtablelove/nix-seed/seed/lock
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
 ```
 
 ### .github/workflows/build.yaml
+
+A plain checkout takes the branch tip, which after a seed cycle is the `lock`
+job's commit — the one naming the seeds that cycle just published. That is
+what you want to build. Note that it is *not* the commit that triggered
+seeding: neither `github.sha` nor the triggering run's `head_sha` names it,
+since both are that commit's parent. If you need the lock commit exactly
+rather than the tip, `seed/lock` publishes its sha as a `seed-lock-commit`
+artifact — see this repository's own `build-examples.yaml`.
 
 ```yaml
 on:

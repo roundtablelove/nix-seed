@@ -5,7 +5,9 @@ CSV.
 
 One `run` row per completed run (its wall clock), then one row per step
 of every `build (<example>, <os>)` / `seed (<example>, <os>)` job of
-that run, plus a `job` row with the job's wall clock. Top-level steps
+that run -- and of seed-examples' un-matrixed `lock` job, whose rows
+carry an empty example and os because it writes every example's lock in
+one commit -- plus a `job` row with the job's wall clock. Top-level steps
 come from the jobs API; the steps inside a composite action (seed
 digest, cache pull, mount seed for build-examples; Nix Setup, Cachix
 Setup, Build seed for seed-examples) only exist in the job log, as
@@ -13,8 +15,9 @@ Setup, Build seed for seed-examples) only exist in the job log, as
 markers, so those two workflows' logs are fetched too. Post-job steps
 of a composite are prefixed `post `. bin/build-seed also carries its
 own `::group::seed: <phase>` markers (eval, build, package, install
-oras, push, lock -- the same instrumentation bin/mount-seed uses), so
-seed-examples' "Build seed" step gets that further breakdown too.
+oras, push, record -- the same instrumentation bin/mount-seed uses), so
+seed-examples' "Build seed" step gets that further breakdown too;
+bin/write-seed-lock carries the cycle's one `seed: lock` phase.
 
 A build-examples job also gets one `seed size` row, its `bytes` column
 holding the seed artifact's compressed size on the wire -- summed from
@@ -74,7 +77,13 @@ FIELDS = (
 # build-examples/build-cache-nix-examples/build-raw-examples name their
 # matrix jobs "build (<example>, <os>)"; seed-examples names its own
 # matrix job "seed (<example>, <os>)" -- same shape, different verb.
-JOB_NAME = re.compile(r"^(?:build|seed) \((?P<example>[^,]+), (?P<os>[^)]+)\)$")
+# seed-examples' "lock" job is not matrixed, so it renders as a bare
+# name and would otherwise be dropped here without a word: the lock
+# phase did not get cheaper when it moved out of the per-arch legs, it
+# just moved, and a silently missing series would read as the former.
+JOB_NAME = re.compile(
+    r"^(?:build|seed) \((?P<example>[^,]+), (?P<os>[^)]+)\)$|^lock$"
+)
 START = re.compile(
     r"##\[start-action display=(?P<name>[^;]*);id=(?P<id>[^\]]*)\]"
 )
@@ -308,8 +317,10 @@ def rows(client: Client, run: Run) -> Iterator[dict[str, object]]:
             "created_at": run.created_at,
             "head_sha": sha,
             "job_id": job["id"],
-            "example": matched["example"],
-            "os": matched["os"],
+            # empty for the un-matrixed lock job, which spans every
+            # example and runs on one runner
+            "example": matched["example"] or "",
+            "os": matched["os"] or "",
             "conclusion": job["conclusion"],
         }
         steps: list[tuple[str, float | None]] = [
