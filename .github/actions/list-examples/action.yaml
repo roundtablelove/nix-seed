@@ -5,6 +5,12 @@ outputs:
   examples:
     description: 'JSON array, e.g. ["cpp-boost","hello/innocent","rust"]'
     value: ${{ steps.list.outputs.examples }}
+  paths:
+    description: >-
+      The same list, repo-relative, e.g. ["examples/rust"]. This is how
+      a digest record names its flake, so it is what seed-examples
+      hands bin/write-seed-lock as --expect.
+    value: ${{ steps.list.outputs.paths }}
 
 runs:
   using: composite
@@ -12,10 +18,12 @@ runs:
     - id: list
       shell: bash
       run: |
+        dirs=$(find examples -name flake.nix -printf '%h\n' | sort)
         examples=$(
-          find examples -name flake.nix -printf '%h\n' \
-            | sed 's|^examples/||' | sort \
+          sed 's|^examples/||' <<<"$dirs" \
             | jq -Rsc 'split("\n") | map(select(length > 0))'
         )
+        paths=$(jq -Rsc 'split("\n") | map(select(length > 0))' <<<"$dirs")
         echo "examples=$examples" >>"$GITHUB_OUTPUT"
+        echo "paths=$paths" >>"$GITHUB_OUTPUT"
         echo "examples: $examples"

@@ -21,9 +21,9 @@ inputs:
     description: GitHub Token for registry login
   push:
     description: >-
-      Push the seed and commit its lock. Set false to build and package
-      only, for timing runs: repeated pushes of a multi-GB seed trip the
-      registry's secondary rate limit.
+      Push the seed and record its digest. Set false to build and
+      package only, for timing runs: repeated pushes of a multi-GB seed
+      trip the registry's secondary rate limit.
     default: "true"
 
   cachix_name:
@@ -65,5 +65,37 @@ runs:
         "$GITHUB_ACTION_PATH"/../bin/build-seed \
           --seed-attr ${{ inputs.seed_attr }} \
           --registry ${{ inputs.registry }} \
-          ${{ inputs.push == 'false' && '--no-push' || '' }} \
+          ${{ inputs.push == 'false' && '--no-push' || format('--record {0}/seed-digest.json', runner.temp) }} \
           ${{ inputs.path }}
+
+    # the digest leaves this leg as an artifact rather than as a commit:
+    # one leg only ever knows its own system, so a lock written here
+    # could only ever name one. seed/lock collects a whole cycle's
+    # records and commits them together. see bin/write-seed-lock.
+    - name: Record digest
+      id: record
+      if: ${{ inputs.push != 'false' }}
+      shell: bash
+      run: |
+        # artifact names reject "/", and a flake path can contain one
+        # (list-examples emits e.g. "hello/innocent"), so slugify. the
+        # name is only a uniqueness key -- write-seed-lock groups by the
+        # path inside the file, and rejects a duplicated system -- so a
+        # slug collision cannot silently merge two flakes' digests.
+        slug=$(jq -r '"\(.path)-\(.system)"' "$RUNNER_TEMP/seed-digest.json" |
+          tr '/.' '--')
+        echo "name=seed-digest-$slug" >>"$GITHUB_OUTPUT"
+
+    - name: Upload digest
+      if: ${{ inputs.push != 'false' }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.record.outputs.name }}
+        path: ${{ runner.temp }}/seed-digest.json
+        retention-days: 1
+        # "re-run failed jobs" re-runs the failed legs into the SAME
+        # run, where the successful legs' artifacts already exist and
+        # are immutable. without this the re-run fails on the upload
+        # rather than on anything real -- and re-running is exactly
+        # what a cycle discarded by one flaky leg asks for.
+        overwrite: true

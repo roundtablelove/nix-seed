@@ -7,18 +7,23 @@ on:
       - master
     # ignore the paths seed-examples watches: a seed-affecting change goes
     # push -> seed-examples -> workflow_run -> build-examples, so build never
-    # races ahead of its seed. (.seed.lock included, not negated: the per-arch
-    # `chore(seed): lock` commits must NOT trigger a build on a half-written
-    # lock -- the post-seed workflow_run covers them.) consumer-side
-    # changes (bin/mount-seed, action.yaml) cannot change a seed's
-    # contents, so they still build directly on push.
+    # races ahead of its seed. (.seed.lock included, not negated: the cycle's
+    # `chore(seed): lock` commit is already build-tested by the workflow_run
+    # this list exists to defer to, so building it again on push would only
+    # duplicate that run.) consumer-side changes (bin/mount-seed,
+    # action.yaml) cannot change a seed's contents, so they still build
+    # directly on push.
+    #
+    # this list must mirror seed-examples' trigger paths, or a change to
+    # one of them fires a direct build *and* a workflow_run build.
     paths-ignore:
       - flake.lock
       - examples/**
       - mkseed/**
       - flake.nix
-      - seed/action.yaml
+      - seed/**
       - bin/build-seed
+      - bin/write-seed-lock
       - bin/make-dmg
       - .github/workflows/seed-examples.yaml
   workflow_run:
@@ -41,22 +46,40 @@ jobs:
       examples: ${{ steps.list.outputs.examples }}
       ref: ${{ steps.ref.outputs.sha }}
     steps:
-      # a plain checkout on a workflow_run event takes whatever is
-      # currently at the default branch's tip, which by the time this
-      # fires is routinely a few `chore(seed): lock` commits ahead of the
-      # change that triggered seeding (seed-examples pushes one per
-      # architecture as it runs). github.event.workflow_run.head_sha does
-      # NOT fix this -- confirmed empirically, it carries the same drift
-      # (it tracked a trailing lock commit even for a plain push trigger).
-      # what does stay correct is the run's own recorded head_sha via the
-      # API, so ask for that instead. github.sha on every other trigger
-      # (push, workflow_dispatch) already is the right commit.
-      - name: resolve the triggering commit
+      # the commit the triggering cycle sealed: seed/lock publishes the
+      # sha of its one `chore(seed): lock` commit as an artifact, and
+      # that commit's locks name the seeds that cycle just built. this
+      # is the point of the chain -- to build-test those, rather than
+      # whatever the previous cycle left behind.
+      #
+      # no other channel carries it. job outputs are not exposed by the
+      # REST API, a plain checkout takes the branch tip (which drifts),
+      # and both github.sha and the run's recorded head_sha name the
+      # commit that *triggered* seeding -- the lock commit's parent.
+      - name: fetch the lock commit
+        if: ${{ github.event_name == 'workflow_run' }}
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: seed-lock-commit
+          path: ${{ runner.temp }}/lock
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: resolve the commit to build
         id: ref
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if [[ ${{ github.event_name }} == workflow_run ]]; then
+          if [[ -f "$RUNNER_TEMP/lock/lock-commit" ]]; then
+            sha=$(<"$RUNNER_TEMP/lock/lock-commit")
+          elif [[ ${{ github.event_name }} == workflow_run ]]; then
+            # a cycle that published nothing has no lock commit: a
+            # --no-push timing dispatch. build whatever master's locks
+            # say today, which is what this did before the artifact
+            # existed. (a cycle with a *failed* leg never reaches here
+            # -- the job-level `if` above gates on its conclusion.)
+            echo "::notice::no seed-lock-commit artifact; building the current locks"
             sha=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id }}" --jq .head_sha)
           else
             sha=${{ github.sha }}
@@ -94,6 +117,12 @@ jobs:
       # workflow_run trigger, so bench-workflows reads the real one back
       # from this step's name via the (much cheaper) jobs API, rather
       # than needing this job's full log.
+      #
+      # the lock commit is a descendant of whatever else landed on
+      # master while the cycle ran, so its *tree* can hold sources newer
+      # than the seed its digests name. that push triggers its own
+      # cycle and the next lock commit heals it -- but an intermediate
+      # run here can go red without anyone having broken anything.
       - name: checkout ${{ needs.setup.outputs.ref }}
         uses: actions/checkout@v7
         with:

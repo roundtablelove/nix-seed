@@ -12,15 +12,22 @@ on:
       - '!examples/**/.seed*.lock'
       # what the seed is made of, and what makes it: mkseed builds the
       # squashfs, flake.nix wires `lib.mkSeed = import ./mkseed`, and the
-      # seed action + build-seed decide what gets pushed and locked. a
-      # change here leaves every published seed stale while the build
-      # workflows keep consuming it, so re-seed. consumer-side code
-      # (bin/mount-seed, action.yaml) is deliberately absent:
+      # seed actions + build-seed/write-seed-lock decide what gets pushed
+      # and locked. a change here leaves every published seed stale while
+      # the build workflows keep consuming it, so re-seed. consumer-side
+      # code (bin/mount-seed, action.yaml) is deliberately absent:
       # it cannot change a seed's contents, and builds test it on push.
       - mkseed/**
       - flake.nix
-      - seed/action.yaml
+      # the root lock pins what flake.nix's lib.mkSeed bakes, so it
+      # changes a seed's contents as surely as flake.nix does.
+      # build-examples has always ignored it on the strength of this
+      # entry; until now it was not actually here, so a root flake.lock
+      # change triggered neither workflow.
+      - flake.lock
+      - seed/**
       - bin/build-seed
+      - bin/write-seed-lock
       # assembles the darwin image, so it decides that artefact's bytes
       - bin/make-dmg
       - .github/workflows/seed-examples.yaml
@@ -35,11 +42,33 @@ on:
         type: boolean
         default: true
 
+# one publishing cycle at a time. two overlapping cycles each carry
+# their own tag, and the lock writer takes whichever finishes last --
+# on the record, 92fec78 wrote tag da2e94f's darwin digest over
+# 7be2aed's newer 3fbe9ad linux digest, which is how master ended up
+# with a rust lock naming one system. serialising removes the
+# interleaving outright, leaving bin/write-seed-lock's retry to handle
+# only an ordinary unrelated push.
+#
+# a --no-push dispatch publishes nothing and locks nothing, so it gets
+# a group of its own rather than queueing behind a real cycle.
+concurrency:
+  group: >-
+    seed-examples-${{ github.ref }}-${{
+      github.event_name == 'workflow_dispatch' && !inputs.push
+        && github.run_id || 'publish' }}
+  # safe to cancel precisely because the cycle is atomic: nothing is
+  # committed until the final job, so a cancelled run leaves no
+  # half-written lock behind -- at worst an orphaned blob in the
+  # registry. only the newest commit's seed is worth waiting for.
+  cancel-in-progress: true
+
 jobs:
   setup:
     runs-on: ubuntu-latest
     outputs:
       examples: ${{ steps.list.outputs.examples }}
+      paths: ${{ steps.list.outputs.paths }}
     steps:
       - uses: actions/checkout@v7
       - id: list
@@ -48,11 +77,17 @@ jobs:
   seed:
     needs: setup
     permissions:
-      contents: write
+      # read: a leg publishes to the registry and records its digest as
+      # an artifact. it no longer commits, so it no longer needs write --
+      # only the lock job below does.
+      contents: read
       id-token: write
       packages: write
     strategy:
-      # one example or platform failing should not cancel seeding the others
+      # one example or platform failing should not cancel seeding the
+      # others: every failure shows up in one run rather than one per
+      # re-run. the cycle's lock is still all-or-nothing -- the lock job
+      # below simply does not run.
       fail-fast: false
       matrix:
         example: ${{ fromJSON(needs.setup.outputs.examples) }}
@@ -72,3 +107,27 @@ jobs:
           # only a dispatch can ask for a non-pushing run; a push event
           # has no inputs and must always publish
           push: ${{ github.event_name != 'workflow_dispatch' || inputs.push }}
+
+  # the single writer. `needs.seed.result` on a matrix job is the
+  # aggregate, so with fail-fast: false one failed leg makes it
+  # 'failure' and this job never runs -- which is the whole
+  # all-or-nothing rule, in one expression. a cycle commits every
+  # system it built, or nothing, and master never holds a lock that
+  # names only some of them.
+  lock:
+    needs:
+      - setup
+      - seed
+    if: >-
+      ${{ needs.seed.result == 'success'
+        && (github.event_name != 'workflow_dispatch' || inputs.push) }}
+    runs-on: ubuntu-latest
+    permissions:
+      # the only job in the cycle that commits
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./seed/lock
+        with:
+          expect: ${{ needs.setup.outputs.paths }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}

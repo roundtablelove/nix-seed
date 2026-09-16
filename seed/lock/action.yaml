@@ -1,0 +1,70 @@
+name: Nix Seed Lock
+description: >-
+  Collect every seed leg's digest record from this run and commit one
+  complete .seed.lock per flake. Run it once, after the seed matrix.
+
+inputs:
+
+  expect:
+    description: >-
+      JSON array of flake paths ("examples/rust") that must each be
+      recorded. A cycle whose records are short then fails here instead
+      of committing a lock that is missing a system.
+
+  attempts:
+    description: Pushes to attempt before giving up
+    default: "3"
+
+  github_token:
+    description: GitHub token used to push the lock commit
+
+outputs:
+
+  sha:
+    description: >-
+      The commit carrying the locks (unchanged HEAD when every digest
+      was already recorded). Published as the seed-lock-commit artifact
+      so a consumer workflow can build exactly what this cycle sealed.
+    value: ${{ steps.write.outputs.sha }}
+
+runs:
+  using: composite
+  steps:
+
+    # no merge-multiple: one directory per artifact keeps the inner
+    # seed-digest.json filenames from colliding, and the writer searches
+    # recursively anyway.
+    - name: Download digests
+      uses: actions/download-artifact@v4
+      with:
+        pattern: seed-digest-*
+        path: ${{ runner.temp }}/digests
+
+    - name: Write locks
+      id: write
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+      run: |
+        "$GITHUB_ACTION_PATH"/../../bin/write-seed-lock \
+          --expect '${{ inputs.expect }}' \
+          --attempts '${{ inputs.attempts }}' \
+          "$RUNNER_TEMP/digests"
+
+    # the commit sha cannot reach a workflow_run consumer any other way:
+    # job outputs are not exposed by the REST API, and the triggering
+    # run's head_sha names this commit's *parent* -- the change that
+    # caused the seeding, not the lock it produced.
+    - name: Publish lock commit
+      shell: bash
+      run: |
+        mkdir -p "$RUNNER_TEMP/lock"
+        echo "${{ steps.write.outputs.sha }}" >"$RUNNER_TEMP/lock/lock-commit"
+
+    - name: Upload lock commit
+      uses: actions/upload-artifact@v4
+      with:
+        name: seed-lock-commit
+        path: ${{ runner.temp }}/lock/lock-commit
+        retention-days: 7
+        overwrite: true
