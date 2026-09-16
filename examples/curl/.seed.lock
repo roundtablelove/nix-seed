@@ -4,5 +4,6 @@
     "aarch64-darwin": "sha256:6d9f3fc95d9fe6765ede844cf777a074cb34c67e1674fa647b07b711a854d849",
     "aarch64-linux": "sha256:5a86cf0c774dde19b0aa6d7566e1a1f2c0de2b6fb82cebdb8b0c66bf6f3a2ce2"
   },
-  "tag": "3fbe9ad6782630d99fb5ce26213d1b2a70d55407"
+  "tag": "3fbe9ad6782630d99fb5ce26213d1b2a70d55407",
+  "version": 1
 }

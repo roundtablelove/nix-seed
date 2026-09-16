@@ -23,6 +23,9 @@ runs:
     # the lock names the registry image and this system's digest; the
     # blob is pulled straight from the registry (four parallel range
     # requests, see bin/mount-seed) and verified against that digest.
+    # a lock is written whole-cycle by bin/write-seed-lock -- every
+    # system its cycle built, at one tag, in one commit -- so a lock
+    # that names no seed for this system was never seeded for it.
     - name: seed digest
       id: seed
       shell: bash
@@ -39,19 +42,28 @@ runs:
         [[ -f $lock ]] || {
           echo "::error::No seed lock at $lock. Nothing has published a" \
             "seed for ${{ inputs.path }} yet -- run the seed-examples" \
-            "workflow (or bin/build-seed ${{ inputs.path }}) first."
+            "workflow first, or bin/build-seed followed by" \
+            "bin/write-seed-lock to publish and record one by hand."
           exit 1
         }
+        # the format gate DESIGN.md#building-from-seed asks for: a lock
+        # this action cannot read is a hard stop, never a silent guess.
+        version=$(jq -r '.version // 0' "$lock")
+        [[ $version == 1 ]] || {
+          echo "::error::$lock is seed lock format version $version;" \
+            "this action understands version 1. Upgrade the nix-seed" \
+            "action, or re-seed ${{ inputs.path }} to rewrite the lock."
+          exit 1
+        }
+
         if ! digest=$(jq -er --arg s "$system" '.systems[$s]' "$lock"); then
           have=$(jq -r '.systems | keys | join(", ") | if . == "" then
             "(none)" else . end' "$lock")
           tag=$(jq -r '.tag // "(none)"' "$lock")
           echo "::error::$lock has no seed for $system. It records: $have" \
-            "(at tag $tag). Either this system was never seeded, or its" \
-            "entry was dropped: build-seed resets .systems whenever .tag" \
-            "changes, so a seed run for a newer commit clears the digests" \
-            "the other systems recorded for the old one. Re-run" \
-            "seed-examples for $system to put it back."
+            "(at tag $tag). A cycle locks every system it built at once," \
+            "so this system is not in the seed matrix for" \
+            "${{ inputs.path }} -- add it there and re-seed."
           exit 1
         fi
         echo "lock=$lock" >>"$GITHUB_OUTPUT"
